@@ -12,6 +12,7 @@ import csv
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import patoolib
 from pandarallel import pandarallel
 import time
@@ -255,10 +256,25 @@ class Preprocessing:
 
         return multiline_logs, json_logs
 
+    def _read_single_file(self, file):
+        """
+        Read a single file and separate its lines into multiline logs and JSON objects.
+        Thread-safe: only reads instance state, never mutates it.
+
+        Returns:
+            tuple: (file_path, size_bytes, line_count, multiline_logs, json_logs)
+        """
+        size = os.path.getsize(file)
+        with open(file, "r", encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        multiline_logs, json_logs = self.detect_jsons(lines)
+        return file, size, len(lines), multiline_logs, json_logs
+
     def process_files(self, file_list):
         """
         For a given list of file, this function outputs two dataframes one for multiline logs and another for json objects.
         Also collects file stats (size, line count) during the read to avoid a second pass.
+        Uses threaded parallel I/O to read multiple files concurrently.
         
         Args:
             file_list (list): list of input file paths
@@ -272,13 +288,15 @@ class Preprocessing:
         file_names_json = []
         total_size_bytes = 0
         num_log_lines_total = 0
-        
-        for file in tqdm(file_list):
-            total_size_bytes += os.path.getsize(file)
-            with open(file, "r", encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                num_log_lines_total += len(lines)
-                multiline_logs, json_logs = self.detect_jsons(lines)
+
+        max_workers = min(len(file_list), os.cpu_count() or 4, 16)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._read_single_file, f): f for f in file_list}
+            for future in tqdm(as_completed(futures), total=len(futures)):
+                file, size, line_count, multiline_logs, json_logs = future.result()
+                total_size_bytes += size
+                num_log_lines_total += line_count
 
                 logs.extend(multiline_logs)
                 json_logs_list.extend(json_logs)

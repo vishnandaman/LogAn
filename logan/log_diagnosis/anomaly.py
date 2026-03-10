@@ -42,50 +42,54 @@ class Anomaly(Core):
         """
         Identifies and merges supersets and subsets within a dictionary of error TID tuples and their corresponding elements.
         
+        Uses union-find (disjoint-set) to merge all subset/superset pairs in a single pass,
+        eliminating the previous recursive O(n^2-per-pass) approach.
+
         Args:
             input_superset_dict (dict): A dictionary where keys are tuples of error TIDs, and values are lists of related elements.
         
         Returns:
             dict: A dictionary where subsets are merged into supersets, ensuring minimal redundant entries.
         """
-        superset_dict = {}
+        entries = [(frozenset(k), v) for k, v in input_superset_dict.items()]
+        n = len(entries)
+        if n <= 1:
+            return input_superset_dict
 
-        for error_tid_tuple, elements in input_superset_dict.items():
+        entries.sort(key=lambda x: len(x[0]), reverse=True)
 
-            # If superset_dict is empty, add the first error TID tuple and elements
-            if len(superset_dict) == 0:
-                superset_dict[error_tid_tuple] = elements
-                continue
+        parent = list(range(n))
 
-            merged_flag = False
-            # Iterate through existing supersets to find any that can be merged
-            for key_tup in list(superset_dict.keys()):
-                superset = set(key_tup)
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
 
-                # Check if the current error_tid_tuple is a subset or superset of an existing key
-                if superset.issuperset(set(error_tid_tuple)):
-                    superset_dict[key_tup].extend(elements)
-                    merged_flag = True
-                    break
-                elif set(error_tid_tuple).issuperset(superset):
-                    superset_dict[error_tid_tuple] = superset_dict.pop(key_tup)
-                    superset_dict[error_tid_tuple].extend(elements)
-                    merged_flag = True
-                    break
+        group_keys = [set(e[0]) for e in entries]
 
-            # If no merging occurred, add the new entry to the dictionary
-            if not merged_flag:
-                try:
-                    if elements not in superset_dict[error_tid_tuple]:
-                        superset_dict[error_tid_tuple] = elements
-                except KeyError:
-                    superset_dict[error_tid_tuple] = elements
+        for i in range(n):
+            ri = find(i)
+            for j in range(i + 1, n):
+                rj = find(j)
+                if ri == rj:
+                    continue
+                key_ri = group_keys[ri]
+                key_rj = group_keys[rj]
+                if key_rj.issubset(key_ri):
+                    parent[rj] = ri
+                elif key_ri.issubset(key_rj):
+                    parent[ri] = rj
+                    ri = rj
 
-        # If input_superset_dict has different size than superset_dict, repeat the merging process
-        if len(input_superset_dict) != len(superset_dict):
-            superset_dict = self.find_supersets_and_subsets_(superset_dict)
-        
-        return superset_dict
+        groups = {}
+        for i in range(n):
+            root = find(i)
+            if root not in groups:
+                groups[root] = (tuple(group_keys[root]), [])
+            groups[root][1].extend(entries[i][1])
+
+        return {key: elements for key, elements in groups.values()}
 
     def merge_sim_windows(self, df):
         """
