@@ -1,7 +1,6 @@
 from enum import Enum
 from typing import Union
 from logan.log_diagnosis.models.manager import ModelTemplate
-from transformers import pipeline
 
 class ZeroShotModels(Enum):
     BART = 'facebook/bart-large-mnli'
@@ -24,6 +23,7 @@ class ModelZeroShotClassifer(ModelTemplate):
             self.model = model
 
     def init_model(self):
+        from transformers import pipeline
         self.pipe = pipeline(task='zero-shot-classification', model=self.model)
 
     def classify_golden_signal(self, input: list[str], batch_size: int=32):

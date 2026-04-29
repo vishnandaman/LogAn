@@ -8,9 +8,6 @@ import pandas as pd
 import gc
 import statistics
 from tqdm import tqdm
-from transformers import pipeline
-from transformers.pipelines.pt_utils import KeyDataset
-from datasets import Dataset
 
 from logan.log_diagnosis.models import ModelManager, AllModels, ModelType
 
