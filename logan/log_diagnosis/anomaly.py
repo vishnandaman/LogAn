@@ -5,8 +5,9 @@ import time
 import csv
 from .core import Core
 from datetime import datetime
-from logan.log_diagnosis.utils import get_anomaly_html_str, get_summary_html_str, compute_golden_signal_timeline
+from logan.log_diagnosis.utils import get_anomaly_html_str, get_summary_html_str, get_explorer_html_str, compute_golden_signal_timeline
 from logan.log_diagnosis.models import ModelManager, AllModels, ModelType
+from logan.store.store import LogStore
 
 class Anomaly(Core):
     """
@@ -323,5 +324,17 @@ class Anomaly(Core):
         html_table = get_summary_html_str(df_for_summary_html, include_golden_signal_dropdown=True, ignored_file_list=ignored_files, processed_file_list=processsed_files, output_dir=output_dir, has_timeline_data=has_timeline_data)
         with open(os.path.join(log_diagnosis_dir, "summary.html"), "w") as f:
             f.write(html_table)
+
+        # Build and persist the structured log store, then render explorer
+        try:
+            store = LogStore(output_dir)
+            store.build_from_df(df_inference_csv, temp_id_to_signal_map)
+            store.save_parquet()
+            store_meta = store.save_json_for_explorer()
+            html_explorer = get_explorer_html_str(store_meta)
+            with open(os.path.join(log_diagnosis_dir, "explorer.html"), "w") as f:
+                f.write(html_explorer)
+        except Exception as exc:
+            print(f"Warning: could not generate log store / explorer: {exc}")
 
         self.compute_anomaly_statistics(output_dir, (time.time() - start) * 1000)

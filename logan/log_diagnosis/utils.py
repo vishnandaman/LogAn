@@ -365,6 +365,28 @@ def compute_golden_signal_timeline(df_for_anomaly_html, output_dir):
     return True
 
 
+def get_explorer_html_str(store_meta: dict) -> str:
+    """
+    Render explorer.html with the store metadata embedded so the page knows
+    which JSON files to fetch for templates and log entries.
+
+    Args:
+        store_meta: dict returned by LogStore.save_json_for_explorer()
+
+    Returns:
+        Rendered HTML string.
+    """
+    path = os.path.dirname(os.path.abspath(__file__))
+    env = Environment(loader=FileSystemLoader(os.path.join(path, 'templates')))
+    html_template = env.get_template('explorer.html')
+    return html_template.render(
+        total_templates=store_meta.get("total_templates", 0),
+        total_entries=store_meta.get("total_entries", 0),
+        templates_file=store_meta.get("templates_file", ""),
+        chunks=store_meta.get("chunks", []),
+    )
+
+
 def prepare_output_dir(output_dir: str, clean_up: bool = False):
     """
     Prepares the output directory by creating necessary subdirectories.
@@ -377,7 +399,7 @@ def prepare_output_dir(output_dir: str, clean_up: bool = False):
         shutil.rmtree(output_dir, ignore_errors=True)
 
     # Create necessary subdirectories.
-    FOLDERS = ['run', 'pandarallel_cache', 'test_templates', 'log_diagnosis', 'developer_debug_files', 'metrics']
+    FOLDERS = ['run', 'pandarallel_cache', 'test_templates', 'log_diagnosis', 'developer_debug_files', 'metrics', 'store']
     os.makedirs(output_dir, exist_ok=True)
     for folder in FOLDERS:
         os.makedirs(os.path.join(output_dir, folder), exist_ok=True)

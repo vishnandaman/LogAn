@@ -261,8 +261,10 @@ def analyze(files, glob, time_range, output_dir, debug_mode, process_all_files, 
     click.echo(click.style("\n" + "=" * 50, fg="green"))
     click.echo(click.style("Analysis complete!", fg="green", bold=True))
     click.echo(f"\nOutput files:")
-    click.echo(f"  Anomaly report: {os.path.join(output_dir, 'log_diagnosis', 'anomalies.html')}")
-    click.echo(f"  Summary report: {os.path.join(output_dir, 'log_diagnosis', 'summary.html')}")
+    click.echo(f"  Anomaly report:  {os.path.join(output_dir, 'log_diagnosis', 'anomalies.html')}")
+    click.echo(f"  Summary report:  {os.path.join(output_dir, 'log_diagnosis', 'summary.html')}")
+    click.echo(f"  Log explorer:    {os.path.join(output_dir, 'log_diagnosis', 'explorer.html')}")
+    click.echo(f"  Store (Parquet): {os.path.join(output_dir, 'store', '')}")
 
 
 @cli.command()

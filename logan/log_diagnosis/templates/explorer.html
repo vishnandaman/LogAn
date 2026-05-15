@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log Explorer — LogAn</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700&family=Red+Hat+Text:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Red+Hat+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>{% include 'static/explorer.css' %}</style>
+</head>
+<body class="explorer-page">
+
+<div class="exp-loading" id="loadingOverlay">Loading log data…</div>
+
+<!-- Header -->
+<header class="exp-header">
+    <span class="exp-header__brand">LogAn</span>
+    <span class="exp-header__sep">|</span>
+    <span class="exp-header__title">Log Explorer</span>
+</header>
+
+<!-- Stats bar -->
+<div class="exp-stats">
+    <div class="exp-stat">
+        <span class="exp-stat__value" id="statTemplates">{{ total_templates }}</span>
+        <span class="exp-stat__label">Unique templates</span>
+    </div>
+    <div class="exp-stat">
+        <span class="exp-stat__value" id="statEntries">{{ "{:,}".format(total_entries) }}</span>
+        <span class="exp-stat__label">Total log lines</span>
+    </div>
+    <div class="exp-stat">
+        <span class="exp-stat__value" id="statVisible">—</span>
+        <span class="exp-stat__label">Templates shown</span>
+    </div>
+    <div class="exp-stat">
+        <span class="exp-stat__value" id="statSelected">—</span>
+        <span class="exp-stat__label">Selected template occurrences</span>
+    </div>
+    <span class="exp-stats__loading" id="entriesLoadStatus">Loading entries…</span>
+</div>
+
+<!-- Main split layout -->
+<div class="exp-layout">
+
+    <!-- Left pane: template list -->
+    <aside class="exp-left">
+        <div class="exp-left__filters">
+            <input
+                type="search"
+                class="exp-search"
+                id="tmplSearch"
+                placeholder="Search templates…"
+                aria-label="Search templates"
+            >
+            <div class="exp-filter-chips" id="filterChips">
+                <button class="exp-chip active" data-gs="all">All</button>
+                <button class="exp-chip gs-error"        data-gs="error">Error</button>
+                <button class="exp-chip gs-latency"      data-gs="latency">Latency</button>
+                <button class="exp-chip gs-saturation"   data-gs="saturation">Saturation</button>
+                <button class="exp-chip gs-availability" data-gs="availability">Availability</button>
+                <button class="exp-chip gs-traffic"      data-gs="traffic">Traffic</button>
+                <button class="exp-chip gs-information"  data-gs="information">Information</button>
+            </div>
+        </div>
+        <div class="exp-template-list" id="tmplList" role="listbox" aria-label="Log templates"></div>
+    </aside>
+
+    <!-- Right pane: log entry viewer -->
+    <main class="exp-right" id="rightPane">
+        <!-- placeholder shown until a template is clicked -->
+        <div class="exp-placeholder" id="placeholder">
+            <div class="exp-placeholder__icon">&#9776;</div>
+            <div>Select a template on the left to explore its log lines.</div>
+            <div style="font-size:0.8em;opacity:0.7">
+                Static parts are shown normally.<br>
+                <span class="exp-var">Variables</span> are highlighted.
+            </div>
+        </div>
+
+        <!-- entry viewer (hidden until template selected) -->
+        <div id="entryViewer" style="display:none;flex:1;flex-direction:column;min-height:0;">
+            <div class="exp-right__header">
+                <div class="exp-detail-template" id="detailTemplate"></div>
+                <div class="exp-detail-meta" id="detailMeta"></div>
+            </div>
+            <div class="exp-right__toolbar">
+                <input
+                    type="search"
+                    class="exp-var-search"
+                    id="varSearch"
+                    placeholder="Filter by variable value…"
+                    aria-label="Filter entries"
+                >
+                <div class="exp-pagination">
+                    <span id="pageLabel"></span>
+                    <button class="exp-btn" id="prevPage" disabled>&#8592; Prev</button>
+                    <button class="exp-btn" id="nextPage">Next &#8594;</button>
+                </div>
+            </div>
+            <div class="exp-entries" id="entriesContainer"></div>
+        </div>
+    </main>
+
+</div>
+
+<script>
+// ── Data injected by Jinja2 ──────────────────────────────────────────────────
+const TEMPLATES_FILE = {{ templates_file | tojson }};
+const ENTRY_CHUNKS   = {{ chunks | tojson }};
+
+// ── State ────────────────────────────────────────────────────────────────────
+let allTemplates   = [];          // [{template_id, template, golden_signal, fault_category, occurrence_count, var_count}]
+let entryIndex     = {};          // template_id (int) -> [{timestamp, variables (parsed), file_source}]
+let chunksLoaded   = 0;
+let entriesReady   = false;
+
+let activeGS       = 'all';
+let searchText     = '';
+let visibleTemplates = [];
+
+let selectedTid    = null;
+let filteredEntries= [];
+let currentPage    = 0;
+const PAGE_SIZE    = 100;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;');
+}
+
+function gsClass(gs) {
+    if (!gs) return 'gs-information';
+    return 'gs-' + gs.toLowerCase().trim();
+}
+
+function formatTs(epoch) {
+    if (!epoch) return '—';
+    const d = new Date(epoch * 1000);
+    return d.toISOString().replace('T',' ').slice(0,19) + ' UTC';
+}
+
+function formatCount(n) {
+    return n != null ? n.toLocaleString() : '—';
+}
+
+/**
+ * Render a log line with static tokens normal and variable tokens highlighted.
+ * template: "Connection to <*> timed out after <*> ms"
+ * variables: ["192.168.1.1", "30"]
+ */
+function renderLogLine(template, variables) {
+    const tokens = template.split(' ');
+    let varIdx = 0;
+    const parts = tokens.map(tok => {
+        if (tok === '<*>') {
+            const val = (variables && varIdx < variables.length) ? variables[varIdx++] : '';
+            return '<span class="exp-var">' + esc(val) + '</span>';
+        }
+        return esc(tok);
+    });
+    // If there are leftover variables beyond template token count, append them
+    while (varIdx < (variables || []).length) {
+        parts.push('<span class="exp-var">' + esc(variables[varIdx++]) + '</span>');
+    }
+    return parts.join(' ');
+}
+
+/**
+ * Render the template string with <*> wildcards highlighted.
+ */
+function renderTemplate(tmpl) {
+    return tmpl.split(' ').map(tok =>
+        tok === '<*>'
+            ? '<span class="exp-tmpl-wildcard">&lt;*&gt;</span>'
+            : esc(tok)
+    ).join(' ');
+}
+
+// ── Data loading ─────────────────────────────────────────────────────────────
+async function loadTemplates() {
+    const resp = await fetch(TEMPLATES_FILE);
+    allTemplates = await resp.json();
+    renderTemplateList();
+    document.getElementById('statTemplates').textContent = formatCount(allTemplates.length);
+}
+
+async function loadEntryChunks() {
+    document.getElementById('entriesLoadStatus').style.display = '';
+    for (const chunk of ENTRY_CHUNKS) {
+        const resp = await fetch(chunk.file);
+        const rows = await resp.json();
+        for (const row of rows) {
+            const tid = row.template_id;
+            if (!entryIndex[tid]) entryIndex[tid] = [];
+            // variables is stored as a JSON string; parse it once here
+            const vars = typeof row.variables === 'string'
+                ? JSON.parse(row.variables)
+                : (row.variables || []);
+            entryIndex[tid].push({
+                timestamp:   row.timestamp,
+                file_source: row.file_source,
+                variables:   vars,
+            });
+        }
+        chunksLoaded++;
+        document.getElementById('entriesLoadStatus').textContent =
+            `Entries: ${chunksLoaded}/${ENTRY_CHUNKS.length} chunks loaded`;
+    }
+    entriesReady = true;
+    document.getElementById('entriesLoadStatus').textContent = 'All entries loaded';
+    // Refresh right pane if a template is already selected
+    if (selectedTid !== null) showEntries(selectedTid);
+}
+
+// ── Template list rendering ───────────────────────────────────────────────────
+function applyFilters() {
+    visibleTemplates = allTemplates.filter(t => {
+        const gs = (t.golden_signal || 'information').toLowerCase().trim();
+        if (activeGS !== 'all' && gs !== activeGS) return false;
+        if (searchText) {
+            const haystack = (t.template || '').toLowerCase();
+            if (!haystack.includes(searchText)) return false;
+        }
+        return true;
+    });
+    document.getElementById('statVisible').textContent = formatCount(visibleTemplates.length);
+}
+
+function renderTemplateList() {
+    applyFilters();
+    const list = document.getElementById('tmplList');
+    if (visibleTemplates.length === 0) {
+        list.innerHTML = '<div class="exp-empty">No templates match the current filters.</div>';
+        return;
+    }
+    const html = visibleTemplates.map(t => {
+        const gs    = (t.golden_signal || 'information').toLowerCase().trim();
+        const cls   = gsClass(gs);
+        const label = t.golden_signal || 'Information';
+        const fault = t.fault_category && t.fault_category !== 'other' ? ` · ${t.fault_category}` : '';
+        const selected = t.template_id === selectedTid ? ' selected' : '';
+        return `
+        <div class="exp-tmpl-item${selected}"
+             role="option"
+             aria-selected="${t.template_id === selectedTid}"
+             data-tid="${t.template_id}"
+             tabindex="0">
+            <div class="exp-tmpl-item__header">
+                <span class="exp-gs-badge ${cls}">${esc(label)}</span>
+            </div>
+            <div class="exp-tmpl-item__text">${renderTemplate(t.template || '')}</div>
+            <div class="exp-tmpl-item__meta">${formatCount(t.occurrence_count)} occurrences${esc(fault)}</div>
+        </div>`;
+    }).join('');
+    list.innerHTML = html;
+
+    list.querySelectorAll('.exp-tmpl-item').forEach(el => {
+        el.addEventListener('click',   () => selectTemplate(+el.dataset.tid));
+        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') selectTemplate(+el.dataset.tid); });
+    });
+}
+
+// ── Template selection ────────────────────────────────────────────────────────
+function selectTemplate(tid) {
+    selectedTid = tid;
+    currentPage = 0;
+    document.getElementById('varSearch').value = '';
+
+    // Highlight in list
+    document.querySelectorAll('.exp-tmpl-item').forEach(el => {
+        const sel = +el.dataset.tid === tid;
+        el.classList.toggle('selected', sel);
+        el.setAttribute('aria-selected', sel);
+    });
+
+    const tmpl = allTemplates.find(t => t.template_id === tid);
+    if (!tmpl) return;
+
+    // Update header
+    document.getElementById('detailTemplate').innerHTML = renderTemplate(tmpl.template || '');
+    document.getElementById('detailMeta').textContent =
+        `${formatCount(tmpl.occurrence_count)} occurrences · ${tmpl.golden_signal || 'Information'} · ${tmpl.fault_category || 'other'}`;
+    document.getElementById('statSelected').textContent = formatCount(tmpl.occurrence_count);
+
+    // Show entry viewer
+    document.getElementById('placeholder').style.display = 'none';
+    const viewer = document.getElementById('entryViewer');
+    viewer.style.display = 'flex';
+
+    showEntries(tid);
+}
+
+function showEntries(tid) {
+    const raw = entryIndex[tid] || [];
+    const varFilter = document.getElementById('varSearch').value.trim().toLowerCase();
+
+    filteredEntries = varFilter
+        ? raw.filter(e => e.variables.some(v => String(v).toLowerCase().includes(varFilter)))
+        : raw;
+
+    currentPage = 0;
+    renderEntries();
+}
+
+function renderEntries() {
+    const tmpl = allTemplates.find(t => t.template_id === selectedTid);
+    const templateStr = tmpl ? tmpl.template : '';
+
+    const total = filteredEntries.length;
+    const start = currentPage * PAGE_SIZE;
+    const end   = Math.min(start + PAGE_SIZE, total);
+    const page  = filteredEntries.slice(start, end);
+
+    document.getElementById('pageLabel').textContent =
+        total > 0 ? `${start + 1}–${end} of ${formatCount(total)}` : '0 entries';
+
+    document.getElementById('prevPage').disabled = currentPage === 0;
+    document.getElementById('nextPage').disabled = end >= total;
+
+    if (!entriesReady && page.length === 0) {
+        document.getElementById('entriesContainer').innerHTML =
+            '<div class="exp-empty">Entries are still loading…</div>';
+        return;
+    }
+    if (total === 0) {
+        document.getElementById('entriesContainer').innerHTML =
+            '<div class="exp-empty">No entries match the current filter.</div>';
+        return;
+    }
+
+    const html = page.map(e => `
+        <div class="exp-entry">
+            <div class="exp-entry__meta">
+                <span>${esc(formatTs(e.timestamp))}</span>
+                <span class="exp-entry__file">${esc(e.file_source)}</span>
+            </div>
+            <div class="exp-entry__log">${renderLogLine(templateStr, e.variables)}</div>
+        </div>`).join('');
+
+    document.getElementById('entriesContainer').innerHTML = html;
+    document.getElementById('entriesContainer').scrollTop = 0;
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+document.getElementById('tmplSearch').addEventListener('input', e => {
+    searchText = e.target.value.trim().toLowerCase();
+    renderTemplateList();
+});
+
+document.getElementById('filterChips').addEventListener('click', e => {
+    const chip = e.target.closest('.exp-chip');
+    if (!chip) return;
+    activeGS = chip.dataset.gs;
+    document.querySelectorAll('.exp-chip').forEach(c => {
+        const match = c.dataset.gs === activeGS;
+        c.classList.toggle('active', match);
+    });
+    renderTemplateList();
+});
+
+document.getElementById('varSearch').addEventListener('input', () => {
+    if (selectedTid !== null) showEntries(selectedTid);
+});
+
+document.getElementById('prevPage').addEventListener('click', () => {
+    if (currentPage > 0) { currentPage--; renderEntries(); }
+});
+document.getElementById('nextPage').addEventListener('click', () => {
+    if ((currentPage + 1) * PAGE_SIZE < filteredEntries.length) { currentPage++; renderEntries(); }
+});
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+(async function init() {
+    if (ENTRY_CHUNKS.length === 0 && '{{ total_entries }}' === '0') {
+        document.getElementById('entriesLoadStatus').textContent = 'No entries';
+        entriesReady = true;
+    }
+    await loadTemplates();
+    loadEntryChunks();  // load in background — don't await so UI is responsive
+})();
+</script>
+</body>
+</html>
