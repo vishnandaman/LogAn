@@ -25,21 +25,22 @@
 <!-- ── Search bar ────────────────────────────────────────────────────── -->
 <div class="exp-searchbar">
     <input class="exp-search-input" id="logSearch" type="search"
-           placeholder="Search log entries…" aria-label="Search log entries">
+           placeholder="Search log entries and variables…" aria-label="Search log entries">
     <button class="exp-search-clear" id="searchClear" title="Clear search">✕</button>
-    <span class="exp-load-status" id="loadStatus">Loading…</span>
+    <span class="exp-load-status" id="loadStatus">Initializing…</span>
 </div>
 
 <!-- ── Body ──────────────────────────────────────────────────────────── -->
 <div class="exp-body">
 
-    <!-- Left sidebar: signal + template filters -->
+    <!-- Left sidebar -->
     <aside class="exp-sidebar">
 
         <div class="exp-sidebar__section">Signal</div>
-        <div class="exp-signals" id="signalList">
-            <!-- populated by JS after entry counts are known -->
-        </div>
+        <div class="exp-signals" id="signalList"></div>
+
+        <div class="exp-sidebar__section">Sources</div>
+        <div class="exp-sources" id="sourceList"></div>
 
         <div class="exp-sidebar__section">Templates</div>
         <div class="exp-tmpl-search">
@@ -52,7 +53,6 @@
     <!-- Main log feed -->
     <div class="exp-feed">
         <div class="exp-feed__toolbar">
-            <!-- active template filter pill (hidden when showing all) -->
             <div class="exp-active-filter" id="activeFilterPill" style="display:none">
                 <span id="activeFilterLabel"></span>
                 <button class="exp-active-filter__clear" id="clearFilter" title="Show all entries">✕</button>
@@ -69,56 +69,70 @@
 
 </div>
 
-<script>
+<!-- Redirect bare and CDN-relative specifiers to locally bundled copies.
+     apache-arrow: bare import used inside duckdb-browser.mjs.
+     /npm/tslib and /npm/flatbuffers: CDN-relative paths emitted by the
+     jsdelivr +esm build of apache-arrow; they resolve to localhost when
+     not served from cdn.jsdelivr.net, so we intercept them here. -->
+<script type="importmap">
+{
+    "imports": {
+        "apache-arrow": "./libs/duckdb/apache-arrow.esm.js",
+        "/npm/tslib@2.6.3/+esm": "./libs/duckdb/tslib.esm.js",
+        "/npm/flatbuffers@24.3.25/+esm": "./libs/duckdb/flatbuffers.esm.js"
+    }
+}
+</script>
+
+<script type="module">
 // ── Injected by Jinja2 ───────────────────────────────────────────────────────
-const TEMPLATES_FILE = {{ templates_file | tojson }};
-const ENTRY_CHUNKS   = {{ chunks | tojson }};
+const TEMPLATES_FILE    = {{ templates_file | tojson }};
+const PARQUET_ENTRIES   = {{ parquet_entries | tojson }};
+const PARQUET_TEMPLATES = {{ parquet_templates | tojson }};
 
-// ── State ────────────────────────────────────────────────────────────────────
-let allTemplates   = [];     // [{template_id, template, golden_signal, fault_category, occurrence_count}]
-let templateMap    = {};     // template_id -> template object
-let allEntries     = [];     // all entries, timestamp DESC (from JSON chunks)
-let entryIndex     = {};     // template_id -> [entry, ...]  (built after all chunks load)
-let signalEntryIndex = {};   // golden_signal -> [entry, ...]
+// ── DuckDB state ─────────────────────────────────────────────────────────────
+let db   = null;
+let conn = null;
 
-let entriesReady   = false;
-let chunksLoaded   = 0;
+// ── App state ─────────────────────────────────────────────────────────────────
+let allTemplates = [];   // [{template_id, template, golden_signal, occurrence_count, …}]
+let templateMap  = {};   // template_id → template object
+let allSources   = [];   // [{file_source, cnt}]
+let signalCounts = {};   // golden_signal → count  (from DuckDB after load)
 
 // Filter state
-let activeGS       = 'all';   // signal filter
-let activeTid      = null;    // specific template filter (null = all in active signal)
-let searchText     = '';
-let tmplSearch     = '';
+let activeGS     = 'all';
+let activeTid    = null;
+let activeSource = null;
+let searchText   = '';
+let tmplSearch   = '';
 
 // Pagination
 let currentPage    = 0;
+let totalFiltered  = 0;
 const PAGE_SIZE    = 100;
-let displayEntries = [];
+let displayEntries = [];   // current page rows from DuckDB
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+let dbReady = false;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
     return String(s)
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-
 function fmt(n) { return n != null ? Number(n).toLocaleString() : '—'; }
-
 function fmtTs(epoch) {
     if (!epoch) return '—';
     return new Date(epoch * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC';
 }
-
 function gsClass(gs) {
-    const s = (gs || 'information').toLowerCase().trim();
-    return 'exp-signal-dot--' + s;
+    return 'exp-signal-dot--' + (gs || 'information').toLowerCase().trim();
 }
-
 function highlight(text, query) {
     if (!query) return esc(text);
     const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'gi');
     return esc(text).replace(re, '<mark>$1</mark>');
 }
-
 function renderTemplateText(tmpl) {
     return tmpl.split(' ').map(tok =>
         tok === '<*>'
@@ -126,8 +140,55 @@ function renderTemplateText(tmpl) {
             : esc(tok)
     ).join(' ');
 }
+function sqlEsc(s) {
+    return String(s).replace(/'/g, "''");
+}
 
-// ── Data loading ─────────────────────────────────────────────────────────────
+// ── DuckDB init ───────────────────────────────────────────────────────────────
+async function initDuckDB() {
+    // All three files are served locally from libs/duckdb/ — no CDN request at view time.
+    const base      = new URL('./libs/duckdb/', window.location.href).href;
+    const workerUrl = base + 'duckdb-browser-mvp.worker.js';
+    const wasmUrl   = base + 'duckdb-mvp.wasm';
+
+    const duckdb = await import(base + 'duckdb-browser.mjs');
+    const worker = new Worker(workerUrl);
+    db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+    await db.instantiate(wasmUrl);
+    conn = await db.connect();
+
+    document.getElementById('loadStatus').textContent = 'Loading parquet…';
+
+    const [entriesBuf, templatesBuf] = await Promise.all([
+        fetch(PARQUET_ENTRIES).then(r => r.arrayBuffer()),
+        fetch(PARQUET_TEMPLATES).then(r => r.arrayBuffer()),
+    ]);
+    await db.registerFileBuffer('entries.parquet',   new Uint8Array(entriesBuf));
+    await db.registerFileBuffer('templates.parquet', new Uint8Array(templatesBuf));
+
+    dbReady = true;
+}
+
+// ── SQL helpers ───────────────────────────────────────────────────────────────
+function buildWhere() {
+    const parts = [];
+    if (activeGS !== 'all')    parts.push(`t.golden_signal = '${sqlEsc(activeGS)}'`);
+    if (activeTid !== null)    parts.push(`e.template_id = ${activeTid}`);
+    if (activeSource !== null) parts.push(`e.file_source = '${sqlEsc(activeSource)}'`);
+    if (searchText) {
+        const q = sqlEsc(searchText);
+        parts.push(`(e.original_text ILIKE '%${q}%' OR e.variables ILIKE '%${q}%')`);
+    }
+    return parts.length ? 'WHERE ' + parts.join(' AND ') : '';
+}
+
+function toRows(arrowTable) {
+    return arrowTable.toArray().map(r => Object.fromEntries(
+        Object.keys(r).map(k => [k, r[k]])
+    ));
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
 async function loadTemplates() {
     const resp = await fetch(TEMPLATES_FILE);
     allTemplates = await resp.json();
@@ -139,88 +200,135 @@ async function loadTemplates() {
     renderSidebar();
 }
 
-async function loadEntryChunks() {
-    for (const chunk of ENTRY_CHUNKS) {
-        const resp = await fetch(chunk.file);
-        const rows = await resp.json();
-        for (const row of rows) {
-            allEntries.push(row);
-            // Build indices
-            const tid = row.template_id;
-            if (!entryIndex[tid]) entryIndex[tid] = [];
-            entryIndex[tid].push(row);
-            const gs = row.golden_signal || 'information';
-            if (!signalEntryIndex[gs]) signalEntryIndex[gs] = [];
-            signalEntryIndex[gs].push(row);
-        }
-        chunksLoaded++;
-        document.getElementById('loadStatus').textContent =
-            `Loading entries… ${chunksLoaded}/${ENTRY_CHUNKS.length}`;
+async function loadSources() {
+    const result = await conn.query(`
+        SELECT file_source, COUNT(*) AS cnt
+        FROM 'entries.parquet'
+        GROUP BY file_source
+        ORDER BY cnt DESC
+    `);
+    allSources = toRows(result).map(r => ({
+        file_source: String(r.file_source || ''),
+        cnt: Number(r.cnt),
+    }));
+    renderSourceList();
+}
+
+async function loadSignalCounts() {
+    const result = await conn.query(`
+        SELECT t.golden_signal, COUNT(*) AS cnt
+        FROM 'entries.parquet' e
+        JOIN 'templates.parquet' t ON e.template_id = t.template_id
+        GROUP BY t.golden_signal
+    `);
+    signalCounts = { all: 0 };
+    for (const r of toRows(result)) {
+        const gs  = (r.golden_signal || 'information').toLowerCase();
+        const cnt = Number(r.cnt);
+        signalCounts[gs] = cnt;
+        signalCounts.all += cnt;
     }
-    entriesReady = true;
-    document.getElementById('loadStatus').textContent =
-        `${fmt(allEntries.length)} entries indexed`;
     renderSignalCounts();
-    applyFilters();
+}
+
+// ── Query + render feed ───────────────────────────────────────────────────────
+async function queryEntries() {
+    if (!dbReady) return;
+
+    const where  = buildWhere();
+    const offset = currentPage * PAGE_SIZE;
+    const fromJoin = `FROM 'entries.parquet' e JOIN 'templates.parquet' t ON e.template_id = t.template_id`;
+
+    const countRes = await conn.query(
+        `SELECT COUNT(*) AS total ${fromJoin} ${where}`
+    );
+    totalFiltered = Number(toRows(countRes)[0].total);
+
+    const rows = await conn.query(`
+        SELECT e.template_id, e.timestamp, e.original_text,
+               e.file_source, e.variables, t.golden_signal
+        ${fromJoin}
+        ${where}
+        ORDER BY e.timestamp DESC, e.file_source ASC, e.entry_id ASC
+        LIMIT ${PAGE_SIZE} OFFSET ${offset}
+    `);
+    displayEntries = toRows(rows).map(r => ({
+        template_id:   Number(r.template_id),
+        timestamp:     Number(r.timestamp),
+        original_text: String(r.original_text || ''),
+        file_source:   String(r.file_source   || ''),
+        variables:     String(r.variables      || '[]'),
+        golden_signal: (r.golden_signal || 'information').toLowerCase(),
+    }));
+
+    renderFeed();
+}
+
+async function applyFilters() {
+    currentPage = 0;
+    await queryEntries();
 }
 
 // ── Sidebar rendering ─────────────────────────────────────────────────────────
 const KNOWN_SIGNALS = ['all','error','latency','saturation','availability','traffic','information'];
 
 function renderSignalCounts() {
-    // Recompute counts from entry index
-    const counts = { all: allEntries.length };
-    for (const [gs, arr] of Object.entries(signalEntryIndex)) {
-        counts[gs] = arr.length;
-    }
+    // Use DuckDB counts when available, fall back to template-derived counts
+    const counts = Object.keys(signalCounts).length
+        ? signalCounts
+        : (() => {
+            const c = { all: 0 };
+            for (const t of allTemplates) {
+                c.all += t.occurrence_count;
+                c[t.golden_signal] = (c[t.golden_signal] || 0) + t.occurrence_count;
+            }
+            return c;
+        })();
+
+    const signals = ['all', ...Object.keys(counts).filter(k => k !== 'all').sort((a, b) =>
+        (KNOWN_SIGNALS.indexOf(a) + 1 || 99) - (KNOWN_SIGNALS.indexOf(b) + 1 || 99)
+    )];
     const list = document.getElementById('signalList');
-    const signals = ['all', ...Object.keys(signalEntryIndex).sort((a,b) => {
-        return (KNOWN_SIGNALS.indexOf(a) + 1 || 99) - (KNOWN_SIGNALS.indexOf(b) + 1 || 99);
-    })];
     list.innerHTML = signals.map(gs => {
-        const label = gs === 'all' ? 'All' : gs.charAt(0).toUpperCase() + gs.slice(1);
-        const cnt   = counts[gs] || 0;
+        const label  = gs === 'all' ? 'All' : gs.charAt(0).toUpperCase() + gs.slice(1);
         const dotCls = gs === 'all' ? 'exp-signal-dot--all' : `exp-signal-dot--${gs}`;
         const active = gs === activeGS ? ' active' : '';
         return `<div class="exp-signal-row${active}" data-gs="${esc(gs)}" role="radio" tabindex="0">
             <span class="exp-signal-dot ${dotCls}"></span>
             <span class="exp-signal-label">${esc(label)}</span>
-            <span class="exp-signal-count">${fmt(cnt)}</span>
+            <span class="exp-signal-count">${fmt(counts[gs] || 0)}</span>
         </div>`;
     }).join('');
     list.querySelectorAll('.exp-signal-row').forEach(el => {
-        el.addEventListener('click', () => setSignal(el.dataset.gs));
+        el.addEventListener('click',   () => setSignal(el.dataset.gs));
         el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') setSignal(el.dataset.gs); });
     });
 }
 
-function renderSidebar() {
-    // Compute counts from templates (occurrence_count available immediately)
-    const counts = { all: 0 };
-    for (const t of allTemplates) {
-        counts.all += t.occurrence_count;
-        const gs = t.golden_signal;
-        counts[gs] = (counts[gs] || 0) + t.occurrence_count;
+function renderSourceList() {
+    const list = document.getElementById('sourceList');
+    if (!allSources.length) {
+        list.innerHTML = '<div class="exp-tmpl-empty">No sources.</div>';
+        return;
     }
-    const signals = ['all', ...Object.keys(counts).filter(k => k !== 'all').sort((a,b) => {
-        return (KNOWN_SIGNALS.indexOf(a) + 1 || 99) - (KNOWN_SIGNALS.indexOf(b) + 1 || 99);
-    })];
-    const list = document.getElementById('signalList');
-    list.innerHTML = signals.map(gs => {
-        const label = gs === 'all' ? 'All' : gs.charAt(0).toUpperCase() + gs.slice(1);
-        const cnt   = counts[gs] || 0;
-        const dotCls = gs === 'all' ? 'exp-signal-dot--all' : `exp-signal-dot--${gs}`;
-        const active = gs === activeGS ? ' active' : '';
-        return `<div class="exp-signal-row${active}" data-gs="${esc(gs)}" role="radio" tabindex="0">
-            <span class="exp-signal-dot ${dotCls}"></span>
-            <span class="exp-signal-label">${esc(label)}</span>
-            <span class="exp-signal-count">${fmt(cnt)}</span>
+    list.innerHTML = allSources.map(s => {
+        const name   = s.file_source.split('/').pop() || s.file_source || '(unknown)';
+        const active = s.file_source === activeSource ? ' active' : '';
+        return `<div class="exp-source-row${active}" data-src="${esc(s.file_source)}"
+                     title="${esc(s.file_source)}" role="option" tabindex="0">
+            <span class="exp-source-icon"></span>
+            <span class="exp-source-label">${esc(name)}</span>
+            <span class="exp-signal-count">${fmt(s.cnt)}</span>
         </div>`;
     }).join('');
-    list.querySelectorAll('.exp-signal-row').forEach(el => {
-        el.addEventListener('click', () => setSignal(el.dataset.gs));
-        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') setSignal(el.dataset.gs); });
+    list.querySelectorAll('.exp-source-row').forEach(el => {
+        el.addEventListener('click',   () => setSource(el.dataset.src));
+        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') setSource(el.dataset.src); });
     });
+}
+
+function renderSidebar() {
+    renderSignalCounts();
     renderTemplateList();
 }
 
@@ -231,19 +339,17 @@ function renderTemplateList() {
         if (q && !(t.template || '').toLowerCase().includes(q)) return false;
         return true;
     });
-
     const list = document.getElementById('tmplList');
-    if (visible.length === 0) {
+    if (!visible.length) {
         list.innerHTML = '<div class="exp-tmpl-empty">No templates match.</div>';
         return;
     }
     list.innerHTML = visible.map(t => {
-        const gs  = t.golden_signal || 'information';
-        const dot = `exp-tmpl-dot--${gs}`;
+        const gs     = t.golden_signal || 'information';
         const active = t.template_id === activeTid ? ' active' : '';
         return `<div class="exp-tmpl-row${active}" data-tid="${t.template_id}" role="option"
                      aria-selected="${t.template_id === activeTid}" tabindex="0">
-            <span class="exp-tmpl-dot ${dot}"></span>
+            <span class="exp-tmpl-dot exp-tmpl-dot--${esc(gs)}"></span>
             <div class="exp-tmpl-body">
                 <div class="exp-tmpl-text">${renderTemplateText(t.template || '')}</div>
                 <div class="exp-tmpl-count">${fmt(t.occurrence_count)} occurrences</div>
@@ -261,27 +367,32 @@ function renderTemplateList() {
 function setSignal(gs) {
     activeGS  = gs;
     activeTid = null;
-    currentPage = 0;
     renderSidebar();
     updateFilterPill();
     applyFilters();
 }
 
+function setSource(src) {
+    activeSource = (activeSource === src) ? null : src;
+    renderSourceList();
+    applyFilters();
+}
+
 function selectTemplate(tid) {
-    activeTid   = (activeTid === tid) ? null : tid;  // toggle
-    currentPage = 0;
+    activeTid = (activeTid === tid) ? null : tid;
     renderTemplateList();
     updateFilterPill();
     applyFilters();
 }
 
 function clearAllFilters() {
-    activeGS    = 'all';
-    activeTid   = null;
-    searchText  = '';
-    currentPage = 0;
+    activeGS     = 'all';
+    activeTid    = null;
+    activeSource = null;
+    searchText   = '';
     document.getElementById('logSearch').value = '';
     renderSidebar();
+    renderSourceList();
     updateFilterPill();
     applyFilters();
 }
@@ -290,8 +401,10 @@ function updateFilterPill() {
     const pill  = document.getElementById('activeFilterPill');
     const label = document.getElementById('activeFilterLabel');
     if (activeTid !== null) {
-        const t = templateMap[activeTid];
-        const text = (t && t.template) ? t.template.slice(0, 60) + (t.template.length > 60 ? '…' : '') : `Template ${activeTid}`;
+        const t    = templateMap[activeTid];
+        const text = (t && t.template)
+            ? t.template.slice(0, 60) + (t.template.length > 60 ? '…' : '')
+            : `Template ${activeTid}`;
         label.textContent = text;
         pill.style.display = 'flex';
     } else {
@@ -299,33 +412,12 @@ function updateFilterPill() {
     }
 }
 
-// ── Entry filtering + render ──────────────────────────────────────────────────
-function applyFilters() {
-    let pool;
-    if (activeTid !== null) {
-        pool = entryIndex[activeTid] || [];
-    } else if (activeGS !== 'all') {
-        pool = signalEntryIndex[activeGS] || [];
-    } else {
-        pool = allEntries;
-    }
-
-    if (searchText) {
-        const q = searchText.toLowerCase();
-        pool = pool.filter(e => (e.original_text || '').toLowerCase().includes(q));
-    }
-
-    displayEntries = pool;
-    renderFeed();
-}
-
+// ── Feed rendering ────────────────────────────────────────────────────────────
 function renderFeed() {
-    const total = displayEntries.length;
+    const total = totalFiltered;
     const start = currentPage * PAGE_SIZE;
-    const end   = Math.min(start + PAGE_SIZE, total);
-    const page  = displayEntries.slice(start, end);
+    const end   = Math.min(start + PAGE_SIZE, start + displayEntries.length);
 
-    const logList = document.getElementById('logList');
     document.getElementById('feedCount').textContent =
         total > 0 ? `${fmt(total)} entries` : '0 entries';
     document.getElementById('pgLabel').textContent =
@@ -333,23 +425,35 @@ function renderFeed() {
     document.getElementById('prevPage').disabled = currentPage === 0;
     document.getElementById('nextPage').disabled = end >= total;
 
-    if (page.length === 0) {
+    const logList = document.getElementById('logList');
+    if (!displayEntries.length) {
         logList.innerHTML = `<div class="exp-log-empty">${
-            entriesReady
-                ? 'No log entries match the current filters.'
-                : 'Entries are still loading — results will appear shortly.'
+            dbReady ? 'No log entries match the current filters.' : 'Loading…'
         }</div>`;
         return;
     }
 
     const q = searchText;
-    logList.innerHTML = page.map(e => {
-        const gs     = e.golden_signal || 'information';
-        const gsLbl  = gs.charAt(0).toUpperCase() + gs.slice(1);
-        const tmpl   = templateMap[e.template_id];
+    logList.innerHTML = displayEntries.map(e => {
+        const gs    = e.golden_signal || 'information';
+        const gsLbl = gs.charAt(0).toUpperCase() + gs.slice(1);
+        const tmpl  = templateMap[e.template_id];
         const tmplTxt = tmpl
             ? tmpl.template.slice(0, 55) + (tmpl.template.length > 55 ? '…' : '')
             : '';
+
+        // Parse variables JSON for display
+        let varsHtml = '';
+        try {
+            const vars = JSON.parse(e.variables);
+            if (vars.length) {
+                const chips = vars.map(v =>
+                    `<span class="exp-var-chip">${highlight(v, q)}</span>`
+                ).join('');
+                varsHtml = `<div class="exp-log-vars">${chips}</div>`;
+            }
+        } catch (_) {}
+
         return `<div class="exp-log-entry">
             <div class="exp-log-meta">
                 <span class="exp-log-ts">${esc(fmtTs(e.timestamp))}</span>
@@ -359,7 +463,8 @@ function renderFeed() {
                     ? `<span class="exp-log-gs" style="background:var(--rh-black-300);font-weight:400;font-size:.65rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(tmpl ? tmpl.template : '')}">${esc(tmplTxt)}</span>`
                     : ''}
             </div>
-            <div class="exp-log-text">${highlight(e.original_text || '', q)}</div>
+            <div class="exp-log-text">${highlight(e.original_text, q)}</div>
+            ${varsHtml}
         </div>`;
     }).join('');
 
@@ -389,24 +494,34 @@ document.getElementById('clearFilter').addEventListener('click', () => {
     updateFilterPill();
     applyFilters();
 });
-document.getElementById('prevPage').addEventListener('click', () => {
-    if (currentPage > 0) { currentPage--; renderFeed(); }
+document.getElementById('prevPage').addEventListener('click', async () => {
+    if (currentPage > 0) { currentPage--; await queryEntries(); }
 });
-document.getElementById('nextPage').addEventListener('click', () => {
-    if ((currentPage + 1) * PAGE_SIZE < displayEntries.length) { currentPage++; renderFeed(); }
+document.getElementById('nextPage').addEventListener('click', async () => {
+    if ((currentPage + 1) * PAGE_SIZE < totalFiltered) { currentPage++; await queryEntries(); }
 });
 
-// ── Boot ─────────────────────────────────────────────────────────────────────
+// ── Boot ──────────────────────────────────────────────────────────────────────
 (async function init() {
-    if (ENTRY_CHUNKS.length === 0) {
-        entriesReady = true;
-        document.getElementById('loadStatus').textContent = 'No entries';
+    try {
+        await loadTemplates();   // sidebar visible immediately from JSON
+        renderFeed();
+
+        await initDuckDB();
+        document.getElementById('loadStatus').textContent = 'Indexing…';
+
+        await Promise.all([loadSources(), loadSignalCounts()]);
+
+        document.getElementById('loadStatus').textContent =
+            `{{ "{:,}".format(total_entries) }} entries ready`;
+
+        await applyFilters();
+    } catch (err) {
+        console.error('Explorer init failed:', err);
+        document.getElementById('loadStatus').textContent = 'Failed to load — check console';
+        document.getElementById('logList').innerHTML =
+            `<div class="exp-log-empty">DuckDB failed to initialize. Open the explorer via <code>logan view</code> — the WASM files must be served over HTTP, not opened as a local file.</div>`;
     }
-    await loadTemplates();
-    // Show template-count-based placeholder while entries load
-    renderFeed();
-    // Load entries in background — UI is usable before this completes
-    loadEntryChunks().then(() => { renderSignalCounts(); applyFilters(); });
 })();
 </script>
 </body>

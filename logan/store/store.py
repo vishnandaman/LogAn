@@ -142,15 +142,24 @@ class LogStore:
             lambda v: int(v) if str(v).lstrip("-").isdigit() else -1
         )
         subset["timestamp"] = subset["timestamp"].fillna(0).astype("int64")
-        subset["variables"] = subset["variables"].fillna("[]").astype(str)
+        subset["variables"] = subset["variables"].apply(
+            lambda v: json.dumps([str(x) for x in v]) if isinstance(v, list)
+            else (v if isinstance(v, str) and v else "[]")
+        )
         subset["file_source"] = subset["file_source"].fillna("").astype(str)
         if has_original:
             subset["original_text"] = subset["original_text"].fillna("").astype(str)
         else:
             subset["original_text"] = ""
 
-        # Sort by timestamp DESC so both Parquet and JSON are in recency order
-        subset = subset.sort_values("timestamp", ascending=False)
+        # Capture original position before any reordering.
+        # Within a single file this is the source line order.  Across files it
+        # reflects the I/O merge order (non-deterministic), so file_source is
+        # used as a secondary sort key in queries to keep cross-file ordering
+        # deterministic.
+        subset = subset.reset_index(drop=True)
+        subset["entry_id"] = subset.index
+
         self._entries = subset.to_dict("records")
 
     def _update_signals(self, temp_id_to_signal_map: dict):
@@ -180,9 +189,9 @@ class LogStore:
         """
         Write templates.parquet and log_entries.parquet.
 
-        log_entries.parquet includes both original_text (for human reading) and
-        variables (for programmatic reconstruction / downstream analytics).
-        Entries are sorted by timestamp DESC for efficient recency-first queries.
+        log_entries.parquet includes original_text, variables, and entry_id.
+        entry_id is the row's position in the pre-sort DataFrame — it preserves
+        within-file line order and is used as a sort tiebreaker in DuckDB queries.
         """
         if self._templates:
             tbl = pa.Table.from_pylist(list(self._templates.values()))
@@ -194,49 +203,20 @@ class LogStore:
 
     def save_json_for_explorer(self) -> dict:
         """
-        Write JSON files consumed by explorer.html.
+        Write the templates JSON consumed by explorer.html's sidebar and return
+        metadata the Jinja2 template embeds.
 
-        Each entry in the JSON chunks contains:
-          template_id, timestamp, original_text, file_source, golden_signal
-
-        golden_signal is denormalised from the template so the explorer can
-        filter the log feed by signal without a separate join.  The 'variables'
-        column is omitted from JSON (it lives in Parquet for downstream use).
-
-        Returns metadata that the Jinja2 template embeds so the page knows
-        which files to fetch.
+        Log entries are no longer written as JSON chunks — explorer.html queries
+        log_entries.parquet directly via DuckDB WASM.
         """
         templates_out = list(self._templates.values())
         with open(os.path.join(self.debug_dir, self.TEMPLATES_JSON), "w") as fh:
             json.dump(templates_out, fh)
 
-        chunks = []
-        for chunk_idx in range(0, max(len(self._entries), 1), ENTRIES_CHUNK_SIZE):
-            chunk = self._entries[chunk_idx : chunk_idx + ENTRIES_CHUNK_SIZE]
-            if not chunk:
-                break
-
-            # Emit display-only fields; denormalise golden_signal from template
-            display_chunk = []
-            for e in chunk:
-                tid = e["template_id"]
-                tmpl = self._templates.get(tid, {})
-                display_chunk.append({
-                    "template_id": tid,
-                    "timestamp": e["timestamp"],
-                    "original_text": e.get("original_text", ""),
-                    "file_source": e["file_source"],
-                    "golden_signal": (tmpl.get("golden_signal") or "information").lower(),
-                })
-
-            fname = f"{self.ENTRIES_JSON_PREFIX}_{len(chunks) + 1}.json"
-            with open(os.path.join(self.debug_dir, fname), "w") as fh:
-                json.dump(display_chunk, fh)
-            chunks.append({"file": f"../developer_debug_files/{fname}", "count": len(display_chunk)})
-
         return {
             "total_templates": len(templates_out),
             "total_entries": len(self._entries),
             "templates_file": "../developer_debug_files/" + self.TEMPLATES_JSON,
-            "chunks": chunks,
+            "parquet_entries": "../store/" + self.ENTRIES_FILE,
+            "parquet_templates": "../store/" + self.TEMPLATES_FILE,
         }

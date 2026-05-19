@@ -383,7 +383,8 @@ def get_explorer_html_str(store_meta: dict) -> str:
         total_templates=store_meta.get("total_templates", 0),
         total_entries=store_meta.get("total_entries", 0),
         templates_file=store_meta.get("templates_file", ""),
-        chunks=store_meta.get("chunks", []),
+        parquet_entries=store_meta.get("parquet_entries", ""),
+        parquet_templates=store_meta.get("parquet_templates", ""),
     )
 
 
@@ -406,6 +407,10 @@ def prepare_output_dir(output_dir: str, clean_up: bool = False):
 
     # Copy HTML templates libs to the output directory.
     shutil.copytree(os.path.join(os.path.dirname(__file__), 'templates', 'libs'), os.path.join(output_dir, 'log_diagnosis', 'libs'), dirs_exist_ok=True)
+
+    # Download (once) and copy DuckDB WASM assets for the log explorer.
+    from logan.store.duckdb_assets import copy_duckdb_to_output
+    copy_duckdb_to_output(os.path.join(output_dir, 'log_diagnosis', 'libs'))
 
     # Setup Env Variables
     os.environ['MEMORY_FS_ROOT'] = os.path.join(output_dir, 'pandarallel_cache')

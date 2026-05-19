@@ -154,6 +154,41 @@ body.explorer-page {
 .exp-signal-label { font-size: .83rem; color: var(--rh-black-200); flex: 1; text-transform: capitalize; }
 .exp-signal-count { font-size: .78rem; color: var(--rh-black-300); font-variant-numeric: tabular-nums; }
 
+/* Source filter */
+.exp-sources {
+  overflow-y: auto;
+  max-height: 130px;
+  border-bottom: 1px solid var(--rh-border-100);
+  flex-shrink: 0;
+}
+
+.exp-source-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .22rem .4rem .22rem .875rem;
+  cursor: pointer;
+  transition: background .1s;
+  user-select: none;
+}
+.exp-source-row:hover  { background: var(--rh-bg-100); }
+.exp-source-row.active { background: var(--rh-bg-200); }
+
+.exp-source-icon {
+  width: 8px; height: 8px; border-radius: 1px; flex-shrink: 0;
+  background: var(--rh-black-300);
+}
+
+.exp-source-label {
+  font-size: .83rem;
+  color: var(--rh-black-200);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--rh-font-mono);
+}
+
 /* Template list */
 .exp-tmpl-search {
   padding: .4rem .875rem;
@@ -346,6 +381,29 @@ body.explorer-page {
   white-space: pre-wrap;
 }
 .exp-log-text mark {
+  background: #fff3cd;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.exp-log-vars {
+  margin-top: .3rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+}
+
+.exp-var-chip {
+  font-family: var(--rh-font-mono);
+  font-size: .7rem;
+  background: #f0f4ff;
+  border: 1px solid #c5d3f0;
+  border-radius: 2em;
+  padding: .05rem .45rem;
+  color: var(--gs-traffic);
+}
+.exp-var-chip mark {
   background: #fff3cd;
   color: inherit;
   border-radius: 2px;
