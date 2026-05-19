@@ -58,6 +58,14 @@
                 <button class="exp-active-filter__clear" id="clearFilter" title="Show all entries">✕</button>
             </div>
             <span class="exp-feed__count" id="feedCount"></span>
+            <div class="exp-sort-control">
+                <label class="exp-sort-label" for="sortSelect">Sort</label>
+                <select class="exp-sort-select" id="sortSelect">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="original">Log order</option>
+                </select>
+            </div>
             <div class="exp-pagination">
                 <span class="exp-pg-label" id="pgLabel"></span>
                 <button class="exp-pg-btn" id="prevPage" disabled>&#8592;</button>
@@ -126,6 +134,7 @@ let activeTid    = null;
 let activeSource = null;
 let searchText   = '';
 let tmplSearch   = '';
+let sortMode     = 'newest';  // 'newest' | 'oldest' | 'original'
 
 // Pagination
 let currentPage    = 0;
@@ -200,6 +209,15 @@ function buildWhere() {
         parts.push(`(e.original_text ILIKE '%${q}%' OR e.variables ILIKE '%${q}%')`);
     }
     return parts.length ? 'WHERE ' + parts.join(' AND ') : '';
+}
+
+function buildOrderBy() {
+    const ts = `CASE WHEN e.timestamp > 0 THEN e.timestamp ELSE NULL END`;
+    switch (sortMode) {
+        case 'oldest':   return `ORDER BY ${ts} ASC NULLS LAST, e.file_source ASC, e.entry_id ASC`;
+        case 'original': return `ORDER BY e.file_source ASC, e.entry_id ASC`;
+        default:         return `ORDER BY ${ts} DESC NULLS LAST, e.file_source ASC, e.entry_id ASC`;
+    }
 }
 
 function toRows(arrowTable) {
@@ -288,8 +306,7 @@ async function queryEntries() {
                e.file_source, e.variables, t.golden_signal
         ${fromJoin}
         ${where}
-        ORDER BY CASE WHEN e.timestamp > 0 THEN e.timestamp ELSE NULL END DESC NULLS LAST,
-                 e.file_source ASC, e.entry_id ASC
+        ${buildOrderBy()}
         LIMIT ${PAGE_SIZE} OFFSET ${offset}
     `);
     displayEntries = toRows(rows).map(r => ({
@@ -544,6 +561,11 @@ document.getElementById('clearFilter').addEventListener('click', () => {
     currentPage = 0;
     renderTemplateList();
     updateFilterPill();
+    applyFilters();
+});
+document.getElementById('sortSelect').addEventListener('change', e => {
+    sortMode    = e.target.value;
+    currentPage = 0;
     applyFilters();
 });
 document.getElementById('prevPage').addEventListener('click', async () => {

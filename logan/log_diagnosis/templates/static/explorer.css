@@ -316,7 +316,31 @@ body.explorer-page {
 .exp-active-filter__clear:hover { color: var(--rh-red); }
 
 .exp-feed__count  { font-size: .82rem; color: var(--rh-black-300); }
-.exp-pagination   { display: flex; align-items: center; gap: .4rem; margin-left: auto; }
+
+.exp-sort-control {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  margin-left: auto;
+}
+.exp-sort-label {
+  font-size: .78rem;
+  color: var(--rh-black-300);
+  white-space: nowrap;
+}
+.exp-sort-select {
+  font-size: .78rem;
+  font-family: var(--rh-font-text);
+  padding: .18rem .5rem;
+  border: 1px solid var(--rh-border-200);
+  border-radius: var(--rh-radius);
+  background: var(--rh-white);
+  color: var(--rh-black-200);
+  cursor: pointer;
+}
+.exp-sort-select:focus { outline: none; border-color: var(--rh-black-300); }
+
+.exp-pagination   { display: flex; align-items: center; gap: .4rem; }
 .exp-pg-label     { font-size: .8rem; color: var(--rh-black-300); white-space: nowrap; }
 .exp-pg-btn {
   border: 1px solid var(--rh-border-200);
