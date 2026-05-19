@@ -6,7 +6,7 @@
     <title>Log Explorer — LogAn</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@700&family=Red+Hat+Text:wght@400;500;600&family=Red+Hat+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>{% include 'static/explorer.css' %}</style>
 </head>
 <body class="explorer-page">
@@ -95,10 +95,30 @@ let db   = null;
 let conn = null;
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let allTemplates = [];   // [{template_id, template, golden_signal, occurrence_count, …}]
-let templateMap  = {};   // template_id → template object
-let allSources   = [];   // [{file_source, cnt}]
-let signalCounts = {};   // golden_signal → count  (from DuckDB after load)
+let allTemplates    = [];   // [{template_id, template, golden_signal, occurrence_count, …}]
+let templateMap     = {};   // template_id → template object
+let templateLabelMap = {};  // template_id → { num, label, color }
+let allSources      = [];   // [{file_source, cnt}]
+let signalCounts    = {};   // golden_signal → count  (from DuckDB after load)
+let sourceTids      = {};   // file_source → Set<template_id>
+
+// Curated palette for the first N templates — hand-picked for distinctiveness.
+const TMPL_PALETTE = [
+    '#0f62fe','#da1e28','#198038','#8a3ffc','#e67e22',
+    '#007d79','#b28600','#9f1853','#1192e8','#005d5d',
+    '#6929c4','#9e1368','#0072c3','#a2191f','#24a148',
+    '#8d5100',
+];
+
+// Returns a unique colour for any template index.
+// Uses the curated palette first; beyond that, the golden-angle hue formula
+// (137.508° ≈ 360° / φ²) distributes hues maximally apart so every additional
+// template gets a colour as far from all previous ones as possible.
+function tmplColor(idx) {
+    if (idx < TMPL_PALETTE.length) return TMPL_PALETTE[idx];
+    const hue = Math.round((idx * 137.508) % 360);
+    return `hsl(${hue},62%,36%)`;
+}
 
 // Filter state
 let activeGS     = 'all';
@@ -193,24 +213,43 @@ async function loadTemplates() {
     const resp = await fetch(TEMPLATES_FILE);
     allTemplates = await resp.json();
     allTemplates.sort((a, b) => b.occurrence_count - a.occurrence_count);
-    for (const t of allTemplates) {
+    templateLabelMap = {};
+    for (let i = 0; i < allTemplates.length; i++) {
+        const t = allTemplates[i];
         t.golden_signal = (t.golden_signal || 'information').toLowerCase();
         templateMap[t.template_id] = t;
+        templateLabelMap[t.template_id] = {
+            num:   i + 1,
+            label: `T${i + 1}`,
+            color: tmplColor(i),
+        };
     }
     renderSidebar();
 }
 
 async function loadSources() {
-    const result = await conn.query(`
-        SELECT file_source, COUNT(*) AS cnt
-        FROM 'entries.parquet'
-        GROUP BY file_source
-        ORDER BY cnt DESC
-    `);
-    allSources = toRows(result).map(r => ({
+    const [countRes, tidRes] = await Promise.all([
+        conn.query(`
+            SELECT file_source, COUNT(*) AS cnt
+            FROM 'entries.parquet'
+            GROUP BY file_source
+            ORDER BY cnt DESC
+        `),
+        conn.query(`
+            SELECT DISTINCT file_source, template_id
+            FROM 'entries.parquet'
+        `),
+    ]);
+    allSources = toRows(countRes).map(r => ({
         file_source: String(r.file_source || ''),
         cnt: Number(r.cnt),
     }));
+    sourceTids = {};
+    for (const r of toRows(tidRes)) {
+        const src = String(r.file_source || '');
+        if (!sourceTids[src]) sourceTids[src] = new Set();
+        sourceTids[src].add(Number(r.template_id));
+    }
     renderSourceList();
 }
 
@@ -249,7 +288,8 @@ async function queryEntries() {
                e.file_source, e.variables, t.golden_signal
         ${fromJoin}
         ${where}
-        ORDER BY e.timestamp DESC, e.file_source ASC, e.entry_id ASC
+        ORDER BY CASE WHEN e.timestamp > 0 THEN e.timestamp ELSE NULL END DESC NULLS LAST,
+                 e.file_source ASC, e.entry_id ASC
         LIMIT ${PAGE_SIZE} OFFSET ${offset}
     `);
     displayEntries = toRows(rows).map(r => ({
@@ -334,9 +374,11 @@ function renderSidebar() {
 
 function renderTemplateList() {
     const q = tmplSearch.toLowerCase();
+    const allowedTids = activeSource !== null ? (sourceTids[activeSource] || new Set()) : null;
     const visible = allTemplates.filter(t => {
         if (activeGS !== 'all' && t.golden_signal !== activeGS) return false;
         if (q && !(t.template || '').toLowerCase().includes(q)) return false;
+        if (allowedTids !== null && !allowedTids.has(t.template_id)) return false;
         return true;
     });
     const list = document.getElementById('tmplList');
@@ -345,11 +387,12 @@ function renderTemplateList() {
         return;
     }
     list.innerHTML = visible.map(t => {
-        const gs     = t.golden_signal || 'information';
         const active = t.template_id === activeTid ? ' active' : '';
+        const lbl    = templateLabelMap[t.template_id] || { label: '?', color: '#6a6e73' };
         return `<div class="exp-tmpl-row${active}" data-tid="${t.template_id}" role="option"
                      aria-selected="${t.template_id === activeTid}" tabindex="0">
-            <span class="exp-tmpl-dot exp-tmpl-dot--${esc(gs)}"></span>
+            <span class="exp-tmpl-badge" style="background:${lbl.color}"
+                  title="Template ${lbl.num}">${esc(lbl.label)}</span>
             <div class="exp-tmpl-body">
                 <div class="exp-tmpl-text">${renderTemplateText(t.template || '')}</div>
                 <div class="exp-tmpl-count">${fmt(t.occurrence_count)} occurrences</div>
@@ -374,7 +417,16 @@ function setSignal(gs) {
 
 function setSource(src) {
     activeSource = (activeSource === src) ? null : src;
+    // Deselect any template that no longer belongs to this source
+    if (activeTid !== null && activeSource !== null) {
+        const tids = sourceTids[activeSource] || new Set();
+        if (!tids.has(activeTid)) {
+            activeTid = null;
+            updateFilterPill();
+        }
+    }
     renderSourceList();
+    renderTemplateList();
     applyFilters();
 }
 
@@ -401,11 +453,14 @@ function updateFilterPill() {
     const pill  = document.getElementById('activeFilterPill');
     const label = document.getElementById('activeFilterLabel');
     if (activeTid !== null) {
-        const t    = templateMap[activeTid];
-        const text = (t && t.template)
-            ? t.template.slice(0, 60) + (t.template.length > 60 ? '…' : '')
-            : `Template ${activeTid}`;
-        label.textContent = text;
+        const lbl = templateLabelMap[activeTid] || { label: `T?`, color: '#6a6e73' };
+        const t   = templateMap[activeTid];
+        const tip = t ? t.template : '';
+        label.innerHTML =
+            `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;`
+            + `background:${lbl.color};vertical-align:middle;margin-right:5px;flex-shrink:0"></span>`
+            + esc(lbl.label);
+        pill.title = tip;
         pill.style.display = 'flex';
     } else {
         pill.style.display = 'none';
@@ -438,11 +493,9 @@ function renderFeed() {
         const gs    = e.golden_signal || 'information';
         const gsLbl = gs.charAt(0).toUpperCase() + gs.slice(1);
         const tmpl  = templateMap[e.template_id];
-        const tmplTxt = tmpl
-            ? tmpl.template.slice(0, 55) + (tmpl.template.length > 55 ? '…' : '')
-            : '';
+        const lbl   = templateLabelMap[e.template_id] || { label: '?', color: '#6a6e73' };
+        const fname = e.file_source.split('/').pop() || e.file_source || '(unknown)';
 
-        // Parse variables JSON for display
         let varsHtml = '';
         try {
             const vars = JSON.parse(e.variables);
@@ -456,12 +509,11 @@ function renderFeed() {
 
         return `<div class="exp-log-entry">
             <div class="exp-log-meta">
-                <span class="exp-log-ts">${esc(fmtTs(e.timestamp))}</span>
-                <span class="exp-log-file">${esc(e.file_source)}</span>
+                <span class="exp-log-file" title="${esc(e.file_source)}">${esc(fname)}</span>
                 <span class="exp-log-gs exp-log-gs--${esc(gs)}">${esc(gsLbl)}</span>
-                ${activeTid === null && tmplTxt
-                    ? `<span class="exp-log-gs" style="background:var(--rh-black-300);font-weight:400;font-size:.65rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(tmpl ? tmpl.template : '')}">${esc(tmplTxt)}</span>`
-                    : ''}
+                <span class="exp-tmpl-badge exp-log-tmpl-badge"
+                      style="background:${lbl.color}"
+                      title="${esc(tmpl ? tmpl.template : '')}">${esc(lbl.label)}</span>
             </div>
             <div class="exp-log-text">${highlight(e.original_text, q)}</div>
             ${varsHtml}

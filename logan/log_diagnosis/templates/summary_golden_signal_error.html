@@ -63,6 +63,7 @@
                 <div class="pf-v5-c-card summary-card">
                     <div class="summary-timeline-header">
                         <h2 class="pf-v5-c-title pf-m-lg">Golden Signals Over Time</h2>
+                        <select id="timelineFileSelect" class="pf-v5-c-form-control timeline-file-select" aria-label="Select data source for timeline"></select>
                         <span class="summary-timeline-subtitle" id="timelineBinLabel"></span>
                         <button type="button" class="pf-v5-c-button pf-m-secondary timeline-mode-btn" id="timelineModeToggle" aria-label="Toggle percentage view" aria-pressed="false">
                             <span>Show %</span>
@@ -80,12 +81,6 @@
             <section class="pf-v5-c-toolbar summary-toolbar" role="toolbar" aria-label="Filters">
                 <div class="pf-v5-c-toolbar__content">
                     <div class="pf-v5-c-toolbar__group pf-m-filter-group">
-                        <div class="pf-v5-c-toolbar__item toolbar-group">
-                            <label class="pf-v5-c-form__label" for="customFilter">File</label>
-                            <select id="customFilter" class="pf-v5-c-form-control" aria-label="Filter by file">
-                                <option value="">All files</option>
-                            </select>
-                        </div>
                         {% if include_golden_signal_dropdown %}
                         <div class="pf-v5-c-toolbar__item toolbar-group">
                             <label class="pf-v5-c-form__label" for="goldenSignalFilter">Golden Signal</label>
@@ -100,6 +95,12 @@
                             </select>
                         </div>
                         {% endif %}
+                        <div class="pf-v5-c-toolbar__item toolbar-group">
+                            <label class="pf-v5-c-form__label" for="customFilter">File</label>
+                            <select id="customFilter" class="pf-v5-c-form-control" aria-label="Filter by file">
+                                <option value="">All files</option>
+                            </select>
+                        </div>
                         <div class="pf-v5-c-toolbar__item toolbar-group">
                             <button type="button" class="pf-v5-c-button pf-m-secondary toggle-cols-btn" id="expand-column-button" aria-label="Toggle Count and Coverage columns" aria-pressed="false">
                                 <span class="pf-v5-c-button__icon chevron-icon" aria-hidden="true"></span>
@@ -221,7 +222,8 @@
     }
 
     function applyCustomFilter() {
-        const filterValue = (document.getElementById('customFilter').value || '').toLowerCase();
+        const rawValue    = document.getElementById('customFilter').value || '';
+        const filterValue = rawValue.toLowerCase();
         if (!dataTableInstance) return;
         dataTableInstance.clear();
         if (filterValue === '') {
@@ -363,27 +365,99 @@
     }
 
     var timelineChart = null;
-    var timelineRawData = null;
+    var timelineRawData = null;      // full JSON: { files, by_file }
     var timelineScaledMode = true;
+    var currentTimelineFile = null;
 
-    function buildTimelineDatasets(data, scaled) {
-        var signals = data.signals || [];
+    // fileData = { bin_seconds, bin_label, signals, bins }
+    function buildTimelineDatasets(fileData, scaled) {
+        var signals = fileData.signals || [];
         var extraIdx = 0;
         return signals.map(function(sig) {
             var color = getSignalColor(sig, extraIdx);
             if (!KNOWN_GS_COLORS[sig.toLowerCase()]) extraIdx++;
             return {
                 label: sig.charAt(0).toUpperCase() + sig.slice(1),
-                data: data.bins.map(function(b) {
+                data: fileData.bins.map(function(b) {
                     var val = b[sig] || 0;
                     if (!scaled || val === 0) return val;
                     return Math.round(Math.log10(val + 1) * 100) / 100;
                 }),
-                rawData: data.bins.map(function(b) { return b[sig] || 0; }),
+                rawData: fileData.bins.map(function(b) { return b[sig] || 0; }),
                 backgroundColor: color,
                 borderWidth: 0
             };
         });
+    }
+
+    function renderTimelineForFile(fname) {
+        var fileData = timelineRawData.by_file[fname];
+        if (!fileData || !fileData.bins || fileData.bins.length === 0) return;
+        currentTimelineFile = fname;
+
+        var binLabel = document.getElementById('timelineBinLabel');
+        if (binLabel) binLabel.textContent = 'Bin size: ' + fileData.bin_label;
+
+        var labels   = fileData.bins.map(function(b) { return b.label; });
+        var datasets = buildTimelineDatasets(fileData, timelineScaledMode);
+
+        var container = document.getElementById('timelineScrollContainer');
+        var canvas    = document.getElementById('timelineChart');
+        var minWidth  = Math.max(container.clientWidth, fileData.bins.length * 18);
+        canvas.style.width  = minWidth + 'px';
+        canvas.style.height = '280px';
+
+        if (timelineChart) {
+            canvas.width  = minWidth;
+            canvas.height = 280;
+            timelineChart.data.labels   = labels;
+            timelineChart.data.datasets = datasets;
+            timelineChart.options.scales.y.title.text =
+                timelineScaledMode ? 'Log count (log₁₀ scaled)' : 'Log count';
+            timelineChart.update();
+        } else {
+            canvas.width  = minWidth;
+            canvas.height = 280;
+            timelineChart = new Chart(canvas, {
+                type: 'bar',
+                data: { labels: labels, datasets: datasets },
+                options: {
+                    responsive: false,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            stacked: true,
+                            ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 40, font: { size: 10 } },
+                            grid: { display: false }
+                        },
+                        y: {
+                            stacked: true,
+                            beginAtZero: true,
+                            title: { display: true, text: 'Log count (log₁₀ scaled)', font: { size: 12 } },
+                            ticks: { font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: { usePointStyle: true, pointStyle: 'rectRounded', padding: 14, font: { size: 12 } }
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                title: function(items) { return items[0].label; },
+                                label: function(ctx) {
+                                    var raw = ctx.dataset.rawData ? ctx.dataset.rawData[ctx.dataIndex] : ctx.raw;
+                                    if (raw === 0) return null;
+                                    return ctx.dataset.label + ': ' + raw;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 
     function loadTimelineChart() {
@@ -393,78 +467,30 @@
         fetch('../developer_debug_files/golden_signal_timeline.json')
             .then(function(resp) { return resp.json(); })
             .then(function(data) {
-                if (!data.bins || data.bins.length === 0) {
+                if (!data.by_file || Object.keys(data.by_file).length === 0) {
                     section.style.display = 'none';
                     return;
                 }
-
                 timelineRawData = data;
 
-                var binLabel = document.getElementById('timelineBinLabel');
-                if (binLabel) binLabel.textContent = 'Bin size: ' + data.bin_label;
+                // Populate file selector
+                var fileSelect = document.getElementById('timelineFileSelect');
+                var files = data.files || Object.keys(data.by_file).sort();
+                if (fileSelect) {
+                    files.forEach(function(f) {
+                        var opt = document.createElement('option');
+                        opt.value = f;
+                        opt.textContent = (f.match(/([^/\\]+)$/) || [f, f])[1];
+                        opt.title = f;
+                        fileSelect.appendChild(opt);
+                    });
+                    fileSelect.addEventListener('change', function() {
+                        renderTimelineForFile(fileSelect.value);
+                    });
+                }
 
-                var labels = data.bins.map(function(b) { return b.label; });
-                var datasets = buildTimelineDatasets(data, true);
-
-                var container = document.getElementById('timelineScrollContainer');
-                var canvas = document.getElementById('timelineChart');
-                var minWidth = Math.max(container.clientWidth, data.bins.length * 18);
-                canvas.style.width = minWidth + 'px';
-                canvas.style.height = '280px';
-                canvas.width = minWidth;
-                canvas.height = 280;
-
-                timelineChart = new Chart(canvas, {
-                    type: 'bar',
-                    data: { labels: labels, datasets: datasets },
-                    options: {
-                        responsive: false,
-                        maintainAspectRatio: false,
-                        scales: {
-                            x: {
-                                stacked: true,
-                                ticks: {
-                                    maxRotation: 45,
-                                    autoSkip: true,
-                                    maxTicksLimit: 40,
-                                    font: { size: 10 }
-                                },
-                                grid: { display: false }
-                            },
-                            y: {
-                                stacked: true,
-                                beginAtZero: true,
-                                title: { display: true, text: 'Log count (log₁₀ scaled)', font: { size: 12 } },
-                                ticks: { font: { size: 11 } }
-                            }
-                        },
-                        plugins: {
-                            legend: {
-                                position: 'top',
-                                labels: {
-                                    usePointStyle: true,
-                                    pointStyle: 'rectRounded',
-                                    padding: 14,
-                                    font: { size: 12 }
-                                }
-                            },
-                            tooltip: {
-                                mode: 'index',
-                                intersect: false,
-                                callbacks: {
-                                    title: function(items) {
-                                        return items[0].label;
-                                    },
-                                    label: function(ctx) {
-                                        var raw = ctx.dataset.rawData ? ctx.dataset.rawData[ctx.dataIndex] : ctx.raw;
-                                        if (raw === 0) return null;
-                                        return ctx.dataset.label + ': ' + raw;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
+                // Render the first file by default
+                if (files.length > 0) renderTimelineForFile(files[0]);
 
                 var toggleBtn = document.getElementById('timelineModeToggle');
                 if (toggleBtn) {
@@ -472,14 +498,12 @@
                     toggleBtn.setAttribute('aria-pressed', 'true');
                     toggleBtn.addEventListener('click', function() {
                         timelineScaledMode = !timelineScaledMode;
-                        var newDatasets = buildTimelineDatasets(timelineRawData, timelineScaledMode);
-                        timelineChart.data.datasets.forEach(function(ds, i) {
-                            ds.data = newDatasets[i].data;
-                            ds.rawData = newDatasets[i].rawData;
-                        });
-                        timelineChart.options.scales.y.title.text = timelineScaledMode ? 'Log count (log₁₀ scaled)' : 'Log count';
+                        if (currentTimelineFile) renderTimelineForFile(currentTimelineFile);
+                        timelineChart.options.scales.y.title.text =
+                            timelineScaledMode ? 'Log count (log₁₀ scaled)' : 'Log count';
                         timelineChart.update();
-                        toggleBtn.querySelector('span').textContent = timelineScaledMode ? 'Show raw count' : 'Show scaled';
+                        toggleBtn.querySelector('span').textContent =
+                            timelineScaledMode ? 'Show raw count' : 'Show scaled';
                         toggleBtn.setAttribute('aria-pressed', timelineScaledMode ? 'true' : 'false');
                     });
                 }

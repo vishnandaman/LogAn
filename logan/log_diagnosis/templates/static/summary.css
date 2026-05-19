@@ -627,6 +627,14 @@
   font-weight: 400;
 }
 
+.timeline-file-select {
+  font-size: var(--rh-font-size-sm);
+  padding: 2px 8px;
+  height: 28px;
+  min-width: 140px;
+  max-width: 260px;
+}
+
 .timeline-mode-btn {
   margin-left: auto;
 }

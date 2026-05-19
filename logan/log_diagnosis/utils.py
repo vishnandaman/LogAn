@@ -264,31 +264,28 @@ def get_summary_html_str(df_for_summary_html, include_golden_signal_dropdown, ig
 
 def compute_golden_signal_timeline(df_for_anomaly_html, output_dir):
     """
-    Compute time-binned golden signal counts from the anomaly DataFrame and write
-    the result to output_dir/log_diagnosis/golden_signal_timeline.json.
+    Compute per-file time-binned golden signal counts and write the result to
+    output_dir/developer_debug_files/golden_signal_timeline.json.
 
-    Returns True if non-empty bins were written, False otherwise.
+    Each file gets its own independent binning based on its own time range, so
+    files whose logs span very different periods don't compress each other's view.
+
+    Output schema:
+        { "files": [...sorted filenames...],
+          "by_file": { filename: { "bin_seconds", "bin_label", "signals", "bins" } } }
+
+    Returns True if at least one file had non-empty bins, False otherwise.
     """
     import math
     from datetime import datetime, timezone
 
     output_path = os.path.join(output_dir, "developer_debug_files", "golden_signal_timeline.json")
-    empty_result = {"bin_seconds": 0, "bin_label": "", "signals": [], "bins": []}
+    empty_result = {"files": [], "by_file": {}}
 
     if df_for_anomaly_html is None or df_for_anomaly_html.empty:
         with open(output_path, "w") as f:
             json.dump(empty_result, f)
         return False
-
-    epochs = df_for_anomaly_html["epoch"].dropna().values
-    if len(epochs) == 0:
-        with open(output_path, "w") as f:
-            json.dump(empty_result, f)
-        return False
-
-    min_epoch = float(epochs.min())
-    max_epoch = float(epochs.max())
-    time_span = max_epoch - min_epoch
 
     CANDIDATE_INTERVALS = [30, 60, 300, 900, 1800, 3600, 21600, 86400]
     INTERVAL_LABELS = {
@@ -296,69 +293,86 @@ def compute_golden_signal_timeline(df_for_anomaly_html, output_dir):
         1800: "30 min", 3600: "1 hour", 21600: "6 hours", 86400: "1 day",
     }
     TARGET_MAX_BINS = 100
+    KNOWN_ORDER = ["error", "latency", "saturation", "traffic", "availability", "information"]
 
-    bin_seconds = CANDIDATE_INTERVALS[-1]
-    for candidate in CANDIDATE_INTERVALS:
-        num_bins = max(1, math.ceil(time_span / candidate)) if time_span > 0 else 1
-        if num_bins <= TARGET_MAX_BINS:
-            bin_seconds = candidate
-            break
-    else:
-        bin_seconds = max(3600, math.ceil(time_span / TARGET_MAX_BINS / 3600) * 3600)
-
-    bin_label = INTERVAL_LABELS.get(bin_seconds, f"{bin_seconds // 3600} hours")
-
-    # Discover all signals from the data
-    all_signals = set()
-    bin_counts = {}
+    # Expand windowed rows into per-entry (file, epoch, signal) triples.
+    # df_for_anomaly_html groups 30-second windows; file_names and golden_signal
+    # are newline- and space-joined respectively, one token per original entry.
+    file_entries: dict = {}  # fname -> list of (epoch_float, sig_lower)
     for _, row in df_for_anomaly_html.iterrows():
         epoch_val = row.get("epoch")
-        gs_str = row.get("golden_signal", "")
+        gs_str    = row.get("golden_signal", "")
+        file_str  = row.get("file_names", "") or ""
         if pd.isna(epoch_val) or not gs_str:
             continue
-        bin_idx = int((float(epoch_val) - min_epoch) // bin_seconds)
+        ep = float(epoch_val)
         signals_in_row = gs_str.strip().split()
-        if bin_idx not in bin_counts:
-            bin_counts[bin_idx] = {}
-        for sig in signals_in_row:
+        files_in_row   = [f.strip() for f in str(file_str).strip().split('\n')]
+        for i, sig in enumerate(signals_in_row):
             sig_lower = sig.lower().strip()
-            if sig_lower:
-                all_signals.add(sig_lower)
-                bin_counts[bin_idx][sig_lower] = bin_counts[bin_idx].get(sig_lower, 0) + 1
+            fname     = files_in_row[i] if i < len(files_in_row) else ''
+            if sig_lower and fname:
+                file_entries.setdefault(fname, []).append((ep, sig_lower))
 
-    if not bin_counts:
+    if not file_entries:
         with open(output_path, "w") as f:
             json.dump(empty_result, f)
         return False
 
-    # Stable ordering: known signals first (in a sensible order), then extras alphabetically
-    KNOWN_ORDER = ["error", "latency", "saturation", "traffic", "availability", "information"]
-    signals = [s for s in KNOWN_ORDER if s in all_signals]
-    signals += sorted(all_signals - set(KNOWN_ORDER))
+    by_file = {}
+    for fname, entries in sorted(file_entries.items()):
+        epochs    = [e for e, _ in entries]
+        min_ep    = min(epochs)
+        max_ep    = max(epochs)
+        time_span = max_ep - min_ep
 
-    max_bin_idx = max(bin_counts.keys())
-    bins = []
-    for i in range(max_bin_idx + 1):
-        bin_start = min_epoch + i * bin_seconds
-        dt = datetime.fromtimestamp(bin_start, tz=timezone.utc)
-        if bin_seconds >= 86400:
-            label = dt.strftime("%Y-%m-%d")
-        elif bin_seconds >= 3600:
-            label = dt.strftime("%Y-%m-%d %H:%M")
+        # Choose the coarsest bin size that keeps the chart under TARGET_MAX_BINS bars
+        bin_seconds = CANDIDATE_INTERVALS[-1]
+        for candidate in CANDIDATE_INTERVALS:
+            num_bins = max(1, math.ceil(time_span / candidate)) if time_span > 0 else 1
+            if num_bins <= TARGET_MAX_BINS:
+                bin_seconds = candidate
+                break
         else:
-            label = dt.strftime("%m-%d %H:%M")
-        counts = bin_counts.get(i, {})
-        bin_entry = {"start": bin_start, "label": label}
-        for s in signals:
-            bin_entry[s] = counts.get(s, 0)
-        bins.append(bin_entry)
+            bin_seconds = max(3600, math.ceil(time_span / TARGET_MAX_BINS / 3600) * 3600)
 
-    result = {
-        "bin_seconds": bin_seconds,
-        "bin_label": bin_label,
-        "signals": signals,
-        "bins": bins,
-    }
+        bin_label  = INTERVAL_LABELS.get(bin_seconds, f"{bin_seconds // 3600} hours")
+
+        all_signals: set = set()
+        bin_counts: dict = {}
+        for ep, sig in entries:
+            bin_idx = int((ep - min_ep) // bin_seconds)
+            all_signals.add(sig)
+            bin_counts.setdefault(bin_idx, {})
+            bin_counts[bin_idx][sig] = bin_counts[bin_idx].get(sig, 0) + 1
+
+        signals = [s for s in KNOWN_ORDER if s in all_signals]
+        signals += sorted(all_signals - set(KNOWN_ORDER))
+
+        bins = []
+        for i in range(max(bin_counts) + 1):
+            bin_start = min_ep + i * bin_seconds
+            dt = datetime.fromtimestamp(bin_start, tz=timezone.utc)
+            if bin_seconds >= 86400:
+                label = dt.strftime("%Y-%m-%d")
+            elif bin_seconds >= 3600:
+                label = dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                label = dt.strftime("%m-%d %H:%M")
+            counts = bin_counts.get(i, {})
+            bin_entry = {"start": bin_start, "label": label}
+            for s in signals:
+                bin_entry[s] = counts.get(s, 0)
+            bins.append(bin_entry)
+
+        by_file[fname] = {
+            "bin_seconds": bin_seconds,
+            "bin_label":   bin_label,
+            "signals":     signals,
+            "bins":        bins,
+        }
+
+    result = {"files": sorted(file_entries.keys()), "by_file": by_file}
     with open(output_path, "w") as f:
         json.dump(result, f, indent=2)
 

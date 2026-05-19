@@ -10,8 +10,8 @@
   --rh-bg-200:      #e7e7e7;
   --rh-border-100:  #d2d2d2;
   --rh-border-200:  #c7c7c7;
-  --rh-font-text:   "Red Hat Text", "Overpass", helvetica, arial, sans-serif;
-  --rh-font-mono:   "Red Hat Mono", "Liberation Mono", "Courier New", monospace;
+  --rh-font-text:   "Inter", "Overpass", helvetica, arial, sans-serif;
+  --rh-font-mono:   "JetBrains Mono", "Liberation Mono", "Courier New", monospace;
   --rh-shadow-sm:   0 1px 2px rgba(3,3,3,.12);
   --rh-shadow-md:   0 4px 8px 1px rgba(3,3,3,.16);
   --rh-radius:      4px;
@@ -227,17 +227,29 @@ body.explorer-page {
   padding-left: calc(.875rem - 3px);
 }
 
-.exp-tmpl-dot {
-  margin-top: 4px;
-  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--gs-information);
+/* Template number badge — used in sidebar list and feed meta */
+.exp-tmpl-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 30px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: .65rem;
+  font-weight: 700;
+  font-family: var(--rh-font-text);
+  letter-spacing: .03em;
+  color: #fff;
+  cursor: default;
+  white-space: nowrap;
 }
-.exp-tmpl-dot--error        { background: var(--gs-error); }
-.exp-tmpl-dot--latency      { background: var(--gs-latency); }
-.exp-tmpl-dot--saturation   { background: var(--gs-saturation); }
-.exp-tmpl-dot--traffic      { background: var(--gs-traffic); }
-.exp-tmpl-dot--availability { background: var(--gs-availability); }
-.exp-tmpl-dot--information  { background: var(--gs-information); }
+/* smaller variant used in the feed meta row */
+.exp-log-tmpl-badge {
+  height: 16px;
+  font-size: .62rem;
+}
 
 .exp-tmpl-body  { flex: 1; min-width: 0; }
 .exp-tmpl-text  {
@@ -346,7 +358,6 @@ body.explorer-page {
   flex-wrap: wrap;
 }
 
-.exp-log-ts   { font-size: .75rem; color: var(--rh-black-300); font-variant-numeric: tabular-nums; }
 .exp-log-file {
   font-family: var(--rh-font-mono);
   font-size: .72rem;
@@ -374,11 +385,12 @@ body.explorer-page {
 
 .exp-log-text {
   font-family: var(--rh-font-mono);
-  font-size: .8rem;
-  line-height: 1.55;
+  font-size: .835rem;
+  line-height: 1.65;
   color: var(--rh-black-100);
   word-break: break-all;
   white-space: pre-wrap;
+  font-feature-settings: "liga" 0;   /* disable ligatures in log output */
 }
 .exp-log-text mark {
   background: #fff3cd;
