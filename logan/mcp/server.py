@@ -206,10 +206,7 @@ async def analyze_logs(
                 os.path.dirname(os.path.dirname(__file__)), "drain", "drain3.ini"
             )
             templatizer = Templatizer(debug_mode=debug_str, config_path=drain_config)
-            templatizer.miner(
-                df, output_dir,
-                os.path.join(output_dir, "test_templates", "tm-test.templates.json"),
-            )
+            templatizer.miner(df, output_dir)
         return templatizer.df
 
     templatized_df = await loop.run_in_executor(None, _run_drain)
@@ -368,10 +365,7 @@ async def extract_templates(
                 os.path.dirname(os.path.dirname(__file__)), "drain", "drain3.ini"
             )
             templatizer = Templatizer(debug_mode="true", config_path=drain_config)
-            templatizer.miner(
-                df, output_dir,
-                os.path.join(output_dir, "test_templates", "tm-test.templates.json"),
-            )
+            templatizer.miner(df, output_dir)
 
             # Extract template patterns from Drain3's internal clusters
             config = TemplateMinerConfig()

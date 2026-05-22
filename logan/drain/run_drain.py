@@ -5,9 +5,23 @@ import json
 import time
 from drain3.template_miner import TemplateMiner
 from drain3.template_miner_config import TemplateMinerConfig
-from drain3.file_persistence import FilePersistence
+from pandarallel import pandarallel
 
 from logan.store.store import LogStore
+
+_pandarallel_initialized = False
+_pandarallel_disabled = False
+
+def _ensure_pandarallel():
+    global _pandarallel_initialized, _pandarallel_disabled
+    if _pandarallel_initialized:
+        return
+    if os.environ.get("LOGAN_DISABLE_PANDARALLEL") == "1":
+        _pandarallel_disabled = True
+        _pandarallel_initialized = True
+        return
+    pandarallel.initialize(progress_bar=False, nb_workers=os.cpu_count() or 2)
+    _pandarallel_initialized = True
 
 class Templatizer:
     """
@@ -24,7 +38,7 @@ class Templatizer:
         compute_drain_statistics(time, output_dir):
             Logs and stores the time taken for the DRAIN3 template mining process.
         
-        miner(df, output_dir, template):
+        miner(df, output_dir):
             Mines log templates from the given DataFrame and saves the templates to a specified path.
     """
     
@@ -67,7 +81,7 @@ class Templatizer:
         with open(os.path.join(output_dir, "metrics", "drain.json"), 'w') as writer:
             writer.write(json.dumps(metrics, indent=4))
     
-    def miner(self, df, output_dir: str, template: str):
+    def miner(self, df, output_dir: str):
         """
         Apply the DRAIN3 template mining algorithm to the given DataFrame.
         
@@ -77,7 +91,6 @@ class Templatizer:
         Args:
             df (pd.DataFrame): DataFrame containing log data with a 'truncated_log' column for mining.
             output_dir (str): The directory where output files, such as statistics, will be saved.
-            template (str): The file path where the mined templates will be stored.
         """
         # Record the start time of the DRAIN3 mining process
         start_time = time.time()
@@ -87,11 +100,8 @@ class Templatizer:
         config = TemplateMinerConfig()
         config.load(self.config_path)
 
-        # Set up file persistence to store the learned templates in the specified template file
-        mem_persistence = FilePersistence(template)
-        
-        # Initialize the TemplateMiner with the loaded configuration and file persistence
-        template_miner_temporary = TemplateMiner(mem_persistence, config)
+        # Initialize the TemplateMiner with no persistence (single-shot analysis, no disk I/O)
+        template_miner_temporary = TemplateMiner(None, config)
 
         # Preserve original log text before Drain3 masking overwrites it
         df["original_text"] = df["text"].astype(str)
@@ -103,16 +113,20 @@ class Templatizer:
         try:
             test_ids = []
             template_strs = []
-            variables_list = []
             for log in df["truncated_log"].values:
                 result = template_miner_temporary.add_log_message(log)
                 test_ids.append(result['cluster_id'])
-                tmpl = result.get('template_mined', '')
-                template_strs.append(tmpl)
-                variables_list.append(LogStore.extract_variables(log, tmpl))
+                template_strs.append(result.get('template_mined', ''))
             df["test_ids"] = test_ids
             df["template_str"] = template_strs
-            df["variables"] = [json.dumps(v) for v in variables_list]
+
+            # Extract variables in parallel — embarrassingly parallel, independent of drain order
+            _ensure_pandarallel()
+            apply_fn = df.apply if _pandarallel_disabled else df.parallel_apply
+            df["variables"] = apply_fn(
+                lambda row: json.dumps(LogStore.extract_variables(row["truncated_log"], row["template_str"])),
+                axis=1,
+            )
 
             if (self.debug_mode == "true"):
                 template_log_dict = df.groupby("test_ids")["truncated_log"].agg(list).to_dict()
