@@ -61,6 +61,12 @@ RUN grep -v "^drain3" requirements.txt > /tmp/reqs_no_drain3.txt \
 COPY --chmod=755 . .
 RUN uv pip install --no-cache-dir . --no-deps
 
+# Pre-download DuckDB WASM assets so first-run requires no network access
+RUN HOME=/opt/app-root/src .venv/bin/python -c \
+    "from logan.store.duckdb_assets import ensure_duckdb_assets; ensure_duckdb_assets()" \
+ && chown -R 1001:0 /opt/app-root/src/.cache \
+ && chmod -R g+rwx /opt/app-root/src/.cache
+
 # Clean up build-only packages
 RUN yum remove -y make gcc python3-devel \
  && yum clean all \
@@ -68,11 +74,6 @@ RUN yum remove -y make gcc python3-devel \
 
 # Redirect runtime caches to /tmp so non-root user can write to them
 ENV HF_HOME="/tmp/hf_cache"
-
-# Pre-create the Logan DuckDB WASM cache dir owned by the runtime user
-RUN mkdir -p /opt/app-root/src/.cache/logan \
- && chown -R 1001:0 /opt/app-root/src/.cache \
- && chmod -R g+rwx /opt/app-root/src/.cache
 
 # Drop to non-root user for runtime
 USER 1001
