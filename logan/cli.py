@@ -243,11 +243,7 @@ def analyze(files, glob, time_range, output_dir, debug_mode, process_all_files, 
     click.echo(click.style("\nStep 2: Generating log templates...", fg="cyan"))
     drain_config_path = os.path.join(os.path.dirname(__file__), 'drain', 'drain3.ini')
     templatizer = Templatizer(debug_mode=debug_mode_str, config_path=drain_config_path)
-    templatizer.miner(
-        preprocessing_obj.df,
-        output_dir,
-        os.path.join(output_dir, "test_templates", "tm-test.templates.json")
-    )
+    templatizer.miner(preprocessing_obj.df, output_dir)
     click.echo(click.style("  Templates generated successfully", fg="green"))
     
     # Step 3: Anomaly detection
