@@ -53,6 +53,10 @@ LOGAN_PROCESS_TXT_FILES="${LOGAN_PROCESS_TXT_FILES:-false}"
 # Clean up output directory before running
 LOGAN_CLEAN_UP="${LOGAN_CLEAN_UP:-false}"
 
+# Path to custom tag config JSON file (enables tagging when set)
+LOGAN_TAG_CONFIG="${LOGAN_TAG_CONFIG:-}"
+
+
 # Port for view mode HTTP server
 LOGAN_VIEW_PORT="${LOGAN_VIEW_PORT:-8000}"
 
@@ -98,6 +102,7 @@ print_config() {
     echo "  LOGAN_PROCESS_LOG_FILES: ${LOGAN_PROCESS_LOG_FILES}"
     echo "  LOGAN_PROCESS_TXT_FILES: ${LOGAN_PROCESS_TXT_FILES}"
     echo "  LOGAN_CLEAN_UP:          ${LOGAN_CLEAN_UP}"
+    echo "  LOGAN_TAG_CONFIG:        ${LOGAN_TAG_CONFIG}"
     echo "  LOGAN_VIEW_PORT:         ${LOGAN_VIEW_PORT}"
     echo ""
 }
@@ -181,6 +186,11 @@ run_analyze() {
     # Add clean up flag
     if [ "${LOGAN_CLEAN_UP,,}" = "true" ]; then
         CMD="$CMD --clean-up"
+    fi
+
+    # Add custom tag config
+    if [ -n "${LOGAN_TAG_CONFIG}" ]; then
+        CMD="$CMD --tag-config \"${LOGAN_TAG_CONFIG}\""
     fi
 
     echo -e "${CYAN}Executing: ${CMD}${NC}"
