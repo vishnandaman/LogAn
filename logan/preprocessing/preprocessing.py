@@ -17,6 +17,7 @@ import patoolib
 from pandarallel import pandarallel
 import time
 import shutil
+import tarfile
 import numpy as np
 from dateutil import parser as god_parse
 
@@ -33,6 +34,11 @@ DEFAULT_CONFIG_SECTION = "preprocessing"
 
 _pandarallel_initialized = False
 _pandarallel_disabled = False
+
+_SOSREPORT_LOG_PATHS = (
+    "var/log/",
+    "sos_logs/",
+)
 
 def _ensure_pandarallel():
     global _pandarallel_initialized, _pandarallel_disabled
@@ -750,6 +756,38 @@ class Preprocessing:
         alphabet_count, digit_count = self.count_alphabets_and_digits(log_without_ts)
             
         return timestamp, ts, log, preprocessed_text, digit_count, alphabet_count + digit_count + 1, len(log.split(" "))
+
+    def _extract_sosreport(self, archive_path, extracted_dir):
+        """
+        Extracts a sosreport to the extracted_dir
+        """
+        with tarfile.open(archive_path, "r:*") as tf:
+            members_to_extract = []
+            for member in tf.getmembers():
+                parts=member.name.split('/',1)
+                inner_path=parts[1] if len(parts)>1 else parts[0]
+
+                if any(inner_path.startswith(path) for path in _SOSREPORT_LOG_PATHS):
+                    members_to_extract.append(member)
+            print(f"SOSreport:extracting {len(members_to_extract)} files")
+            tf.extractall(extracted_dir, members=members_to_extract)
+
+        
+    def _is_sosreport(self, archive_path):
+        """
+        Checks if the archive is a sosreport
+        """
+        try:
+            if tarfile.is_tarfile(archive_path):
+                with tarfile.open(archive_path, "r:*") as tf:
+                    for i,member in enumerate(tf):
+                        if i>20:
+                            break
+                        if 'sosreport' in member.name.lower() or 'sos_commands' in member.name.lower():
+                            return True
+        except Exception as e:
+            pass
+        return False
     
     def _extract_archive(self, archive_path, output_dir):
         """
@@ -757,18 +795,22 @@ class Preprocessing:
         """
         extracted_dir = os.path.join(output_dir,"extracted_archives",os.path.basename(archive_path).replace(".", "_"))
         os.makedirs(extracted_dir, exist_ok=True)
-        patoolib.extract_archive(archive_path, outdir=extracted_dir)
+        if self._is_sosreport(archive_path):
+            self._extract_sosreport(archive_path, extracted_dir)
 
-        for root, dirs, files in os.walk(extracted_dir):
-            for f in files:
-                nested_extracted_dir = os.path.join(root, f)
-                try:
-                    if patoolib.is_archive(nested_extracted_dir):
-                        patoolib.extract_archive(nested_extracted_dir, outdir=root)
-                        os.remove(nested_extracted_dir)
-                except Exception as e:
-                    print(f"Error extracting archive {nested_extracted_dir}: {e}")
-                    continue
+        else:
+            patoolib.extract_archive(archive_path, outdir=extracted_dir)
+
+            for root, dirs, files in os.walk(extracted_dir):
+                for f in files:
+                    nested_extracted_dir = os.path.join(root, f)
+                    try:
+                        if patoolib.is_archive(nested_extracted_dir):
+                            patoolib.extract_archive(nested_extracted_dir, outdir=root)
+                            os.remove(nested_extracted_dir)
+                    except Exception as e:
+                        print(f"Error extracting archive {nested_extracted_dir}: {e}")
+                        continue
 
         return extracted_dir
 
