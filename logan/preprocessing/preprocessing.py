@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import patoolib
 from pandarallel import pandarallel
 import time
+import shutil
+import tarfile
 import numpy as np
 from dateutil import parser as god_parse
 
@@ -32,6 +34,11 @@ DEFAULT_CONFIG_SECTION = "preprocessing"
 
 _pandarallel_initialized = False
 _pandarallel_disabled = False
+
+_SOSREPORT_LOG_PATHS = (
+    "var/log/",
+    "sos_logs/",
+)
 
 def _ensure_pandarallel():
     global _pandarallel_initialized, _pandarallel_disabled
@@ -750,6 +757,63 @@ class Preprocessing:
             
         return timestamp, ts, log, preprocessed_text, digit_count, alphabet_count + digit_count + 1, len(log.split(" "))
 
+    def _extract_sosreport(self, archive_path, extracted_dir):
+        """
+        Extracts a sosreport to the extracted_dir
+        """
+        with tarfile.open(archive_path, "r:*") as tf:
+            members_to_extract = []
+            for member in tf.getmembers():
+                parts=member.name.split('/',1)
+                inner_path=parts[1] if len(parts)>1 else parts[0]
+
+                if any(inner_path.startswith(path) for path in _SOSREPORT_LOG_PATHS):
+                    members_to_extract.append(member)
+            print(f"SOSreport:extracting {len(members_to_extract)} files")
+            tf.extractall(extracted_dir, members=members_to_extract)
+
+        
+    def _is_sosreport(self, archive_path):
+        """
+        Checks if the archive is a sosreport
+        """
+        try:
+            if tarfile.is_tarfile(archive_path):
+                with tarfile.open(archive_path, "r:*") as tf:
+                    for i,member in enumerate(tf):
+                        if i>20:
+                            break
+                        if 'sosreport' in member.name.lower() or 'sos_commands' in member.name.lower():
+                            return True
+        except Exception as e:
+            pass
+        return False
+    
+    def _extract_archive(self, archive_path, output_dir):
+        """
+        Extracts an archive to a temp directory under the output_dir and returns the path
+        """
+        extracted_dir = os.path.join(output_dir,"extracted_archives",os.path.basename(archive_path).replace(".", "_"))
+        os.makedirs(extracted_dir, exist_ok=True)
+        if self._is_sosreport(archive_path):
+            self._extract_sosreport(archive_path, extracted_dir)
+
+        else:
+            patoolib.extract_archive(archive_path, outdir=extracted_dir)
+
+            for root, dirs, files in os.walk(extracted_dir):
+                for f in files:
+                    nested_extracted_dir = os.path.join(root, f)
+                    try:
+                        if patoolib.is_archive(nested_extracted_dir):
+                            patoolib.extract_archive(nested_extracted_dir, outdir=root)
+                            os.remove(nested_extracted_dir)
+                    except Exception as e:
+                        print(f"Error extracting archive {nested_extracted_dir}: {e}")
+                        continue
+
+        return extracted_dir
+
     def preprocess(self, input_files, time_range, output_dir, process_all_files, process_log_files, process_txt_files):
         """
         Preprocess a set of log files by filtering, processing, and performing truncation of logs using statistical analysis on the logs length.
@@ -833,11 +897,43 @@ class Preprocessing:
 
             # Skip archives or irrelevant file types
             if patoolib.is_archive(file_):
-                ignored_list.append(file_)
+                try:
+
+                    extracted_dir=self._extract_archive(file_,output_dir)
+                    # Process extracted directory the same way as regular directory
+
+                    all_files_in_dir = [fp for fp in glob.glob(os.path.join(extracted_dir, '**'), recursive=True) if not os.path.isdir(fp)]
+                    log_files, txt_files = [], []
+                
+                    if process_all_files:
+                        files_to_process.extend(all_files_in_dir)
+                    else:
+                        if process_txt_files:
+                            txt_files = [file for file in all_files_in_dir if self.pattern_txt.match(os.path.basename(file))]
+                        if process_log_files:
+                            log_files = [file for file in all_files_in_dir if self.pattern_log.match(os.path.basename(file))]
+
+                        files_to_process.extend(log_files + txt_files)
+                        ignored_list.extend([fp for fp in all_files_in_dir if fp not in (log_files + txt_files)])
+                
+                except Exception as e:
+                    print(f"Error extracting archive {file_}: {e}")
+                    ignored_list.append(file_)
 
             # Handle directories by finding log files
             elif os.path.isdir(file_):
                 all_files_in_dir = [fp for fp in glob.glob(os.path.join(file_, '**'), recursive=True) if not os.path.isdir(fp)]
+
+                # Extract any archives found inside the directory
+                for af in list(all_files_in_dir):
+                    try:
+                        if patoolib.is_archive(af):
+                            all_files_in_dir.remove(af)
+                            extracted_dir = self._extract_archive(af, output_dir)
+                            extracted_files = [fp for fp in glob.glob(os.path.join(extracted_dir, '**'), recursive=True) if not os.path.isdir(fp)]
+                            all_files_in_dir.extend(extracted_files)
+                    except Exception as e:
+                        print(f"Error extracting archive {af}: {e}")
 
                 log_files, txt_files = [], []
                 if process_all_files:
@@ -874,6 +970,9 @@ class Preprocessing:
 
         # Process the log files and get dataframes for logs and JSON objects
         df, df_json = self.process_files(files_to_process)
+        extract_base=os.path.join(output_dir,"extracted_archives")
+        if os.path.exists(extract_base):
+            shutil.rmtree(extract_base)
 
         # Process JSON data in parallel (return tuples, build DataFrame once — avoids per-row pd.Series overhead)
         df_json = df_json.dropna()

@@ -280,7 +280,7 @@ class Core:
             'timestamps': self.select_first_item
         }).reset_index()
 
-        rep_lol = representative_df["preprocessed_text"].tolist()
+        rep_lol = [log if log and str(log[0]).strip() else ["empty log"] for log in representative_df["preprocessed_text"].tolist()]
         temp_ids = representative_df["test_ids"].tolist()
         file_names = representative_df["file_names"].tolist()
         del representative_df
